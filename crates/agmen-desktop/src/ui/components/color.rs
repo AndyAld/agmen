@@ -37,6 +37,13 @@ pub(crate) enum Color {
 }
 
 impl Color {
+    /// An agent's color: the palette slot the person picked for it at
+    /// launch, or else its role's.
+    #[must_use]
+    pub(crate) fn agent(slot: Option<u8>, role: &str) -> Self {
+        slot.map_or_else(|| Self::Role(role.to_owned().into()), Self::Player)
+    }
+
     pub(crate) fn hsla(&self, theme: &Theme) -> Hsla {
         match self {
             Self::Default => theme.text,

@@ -189,6 +189,7 @@ impl PlanRoom {
                 let role = AgentRole {
                     name: row.role.clone(),
                     label: row.role_label.clone(),
+                    slot: None,
                 };
                 rows.push(agent_item(
                     format!("team:agent:{owner}/{}", row.handle),

@@ -234,7 +234,9 @@ impl Workspace {
             ),
             Err(error) => ("sonnet".into(), Some(error.to_string())),
         };
-        let dialog = cx.new(|cx| super::new_agent_dialog::NewAgentDialog::new(model, error, cx));
+        let dialog = cx.new(|cx| {
+            super::new_agent_dialog::NewAgentDialog::new(model, error, cx).choices(&self.snapshot)
+        });
         self.new_agent_events = Some(cx.subscribe(
             &dialog,
             |this, _, _: &super::new_agent_dialog::Closed, cx| {

@@ -44,6 +44,7 @@ fn agent(
         status,
         depth,
         item: None,
+        color: None,
     })
 }
 
@@ -713,6 +714,7 @@ pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
             status,
             depth: 0,
             item: None,
+            color: None,
         })
     };
     Ok(vec![

@@ -166,7 +166,12 @@ pub(crate) enum Action {
     LaunchAgent {
         name: String,
         model: String,
-        budget_cents: u32,
+        /// `None` launches with no budget.
+        budget_cents: Option<u32>,
+        /// `None` is a general-purpose agent: no role.
+        role: Option<String>,
+        /// The palette slot to draw the agent in; `None` follows its role.
+        color: Option<u8>,
     },
     StopAgent(IdentityId),
     /// Brings an offline agent back on its previous sessions. `root` is
@@ -475,6 +480,9 @@ pub(crate) struct AgentRow {
     pub(crate) depth: u8,
     /// The item it works on or reads, as the hub's roster reports it.
     pub(crate) item: Option<String>,
+    /// The palette slot the person picked for it at launch, known only for
+    /// agents this machine runs.
+    pub(crate) color: Option<u8>,
 }
 
 /// One person and their agents.
@@ -587,6 +595,7 @@ pub(crate) struct AgentInfo {
     pub(crate) worktree_state: String,
     pub(crate) cleanup: String,
     pub(crate) spent_usd: f64,
+    /// Infinite for an agent launched with no budget.
     pub(crate) budget_usd: f64,
     pub(crate) since_launch_minutes: u32,
     pub(crate) working_minutes: u32,

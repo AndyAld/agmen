@@ -98,6 +98,20 @@ impl Managed {
         // (ruling 7). This holds with budgets off too: the cap is recorded now
         // and enforced when budgets come back on.
         let allowed = Money::from_usd(&settings.separate_child_usd.to_string()).map_err(error)?;
+        // The person lifted the cap for this tree (Andy, 2026-11-13). A child
+        // inherits that unless it asks for a cap of its own, and there is
+        // nothing finite to reserve from.
+        if held.budget.unlimited() {
+            match &launch.budget_usd {
+                Some(asked) => {
+                    let asked = Money::from_usd(&asked.to_string()).map_err(error)?;
+                    let amount = if shared { asked } else { asked.min(allowed) };
+                    launch.budget_usd = Some(amount.usd().parse().map_err(error)?);
+                }
+                None => launch.no_budget = true,
+            }
+            return Ok(None);
+        }
         let amount = match &launch.budget_usd {
             Some(asked) if shared => Money::from_usd(&asked.to_string()).map_err(error)?,
             Some(asked) => Money::from_usd(&asked.to_string())

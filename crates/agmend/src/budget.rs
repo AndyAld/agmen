@@ -13,6 +13,9 @@ pub(crate) struct InvalidCost;
 
 impl Money {
     pub(crate) const ZERO: Self = Self(0);
+    /// The cap of an agent launched with no budget. Out-of-range amounts
+    /// saturate to it too, so no finite cap can sit above it.
+    pub(crate) const MAX: Self = Self(u64::MAX);
 
     pub(crate) fn child_reserve_share(self) -> Self {
         let (numerator, denominator) = CHILD_RESERVE_SHARE;
@@ -150,6 +153,11 @@ impl Budget {
 
     pub(crate) fn spent(&self) -> Money {
         self.spent
+    }
+
+    /// Whether the person launched this agent with no budget.
+    pub(crate) fn unlimited(&self) -> bool {
+        self.cap == Money::MAX
     }
 
     pub(crate) fn remaining_usd(&self) -> String {

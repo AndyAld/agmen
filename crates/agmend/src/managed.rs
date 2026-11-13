@@ -28,6 +28,8 @@ use crate::state::ManagedIdentity;
 use roles::{PersonalSnapshot, ReviewedBase, RoleCacheKey};
 
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
+/// Palette slots a launch may name; a theme with fewer falls back in the desktop.
+const MAX_COLOR_SLOTS: u8 = 16;
 pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
 /// How long quit lets an admitted launch finish before abandoning it.
 pub(crate) const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
@@ -44,7 +46,14 @@ pub(crate) struct Launch {
     root: Option<PathBuf>,
     model: Option<String>,
     budget_usd: Option<serde_json::Number>,
+    /// No spending cap. Only the person's own launch can ask: a child launch
+    /// has no such field, and gets it only by inheriting it from its parent.
+    #[serde(default)]
+    no_budget: bool,
     role: Option<String>,
+    /// The theme palette slot the desktop draws this agent in. Kept on this
+    /// machine only.
+    color: Option<u8>,
 }
 
 /// The branch and folder a launch created for its worker.
@@ -100,6 +109,9 @@ struct Record {
     depth: u32,
     #[serde(default)]
     shared_budget: bool,
+    /// The desktop's palette slot for this agent, when the person picked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<u8>,
 }
 
 fn root_depth() -> u32 {
@@ -320,11 +332,26 @@ impl Managed {
                 .map_or_else(|| "5".into(), ToString::to_string),
         )
         .map_err(error)?;
+        if launch.no_budget && launch.budget_usd.is_some() {
+            return Err(bad_request("give budget_usd or no_budget, not both"));
+        }
+        if launch.color.is_some_and(|slot| slot >= MAX_COLOR_SLOTS) {
+            return Err(bad_request("color must be a palette slot from 0 to 15"));
+        }
         Ok(launch)
     }
 
     pub(crate) async fn launch(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let launch = Self::validate_launch(raw)?;
+        // An out-of-range amount saturates to the cap that means no budget. A
+        // child's ask is clamped or refused against its parent instead.
+        if let Some(asked) = &launch.budget_usd
+            && Money::from_usd(&asked.to_string()).map_err(error)? == Money::MAX
+        {
+            return Err(bad_request(
+                "budget_usd is out of range; give no_budget for no cap",
+            ));
+        }
         let root = match launch.root.clone() {
             Some(root) => root,
             None => self
@@ -413,7 +440,9 @@ impl Managed {
             .budget_usd
             .as_ref()
             .map_or_else(|| "5".into(), ToString::to_string);
-        let budget_usd = if parent.is_some() {
+        let budget_usd = if launch.no_budget {
+            Money::MAX.usd()
+        } else if parent.is_some() {
             Money::from_usd(&budget_usd).map_err(error)?.usd()
         } else {
             budget_usd
@@ -440,6 +469,7 @@ impl Managed {
                 .map(|parent| parent.identity.identity_id.clone()),
             depth,
             shared_budget,
+            color: launch.color,
         };
         let record_layer = record.role_layer.clone();
         let local_token = identities.local_token(&identity.identity_id).await?;
@@ -755,11 +785,9 @@ impl Managed {
         settings: &Safeguards,
     ) -> RunSpec {
         let batch_cap = held.batch_cap(owner_only, can_launch, settings);
-        held.in_flight_cap = if settings.budgets {
-            batch_cap
-        } else {
-            Money::ZERO
-        };
+        // An agent with no budget runs uncapped and protects nothing from its children.
+        let cap_budget = settings.budgets && !held.budget.unlimited();
+        held.in_flight_cap = if cap_budget { batch_cap } else { Money::ZERO };
         RunSpec {
             cwd: held.record.worktree.clone(),
             prompt,
@@ -768,7 +796,7 @@ impl Managed {
             model: held.record.model.clone(),
             budget_remaining: held.budget.remaining_usd(),
             budget_cap: Some(batch_cap),
-            cap_budget: settings.budgets,
+            cap_budget,
             identity: held.record.identity.identity_id.clone(),
             local_token: None,
             mcp_config: self
@@ -843,6 +871,12 @@ impl Managed {
             entry["parent"] = json!(record.parent);
             entry["depth"] = json!(record.depth);
             entry["stopped_at"] = json!(worker.stopped_at);
+            if worker.budget.unlimited() {
+                entry["no_budget"] = json!(true);
+            }
+            if let Some(color) = record.color {
+                entry["color"] = json!(color);
+            }
             // One roster read per local project, not per agent: the desktop polls this.
             let resumable = if agmen_client::is_local(&record.identity.hub_url) {
                 let members = match local_members.entry(record.identity.project.clone()) {
@@ -936,10 +970,16 @@ impl Managed {
         {
             return Err(crate::identities::forbidden());
         }
+        if held.budget.unlimited() {
+            return Err(bad_request("this agent has no budget to raise"));
+        }
         let cap = Money::from_usd(&held.record.budget_usd)
             .map_err(error)?
             .checked_add(add)
             .map_err(error)?;
+        if cap == Money::MAX {
+            return Err(invalid());
+        }
         let mut record = held.record.clone();
         record.budget_usd = cap.usd();
         drop(held);
@@ -1339,10 +1379,19 @@ async fn run_worker(
             }
         }
         Err(error) => {
-            let cost = error
-                .reported_cost()
-                .map(str::to_owned)
-                .unwrap_or_else(|| held.budget.remaining_usd());
+            // With no budget there is no remaining cap to charge, and charging
+            // it would stop the agent for good.
+            let unknown = error.reported_cost().is_none() && !held.budget.unlimited();
+            let cost = error.reported_cost().map_or_else(
+                || {
+                    if unknown {
+                        held.budget.remaining_usd()
+                    } else {
+                        "0".into()
+                    }
+                },
+                str::to_owned,
+            );
             // shortcut: charge unknown interrupted usage against the remaining cap
             // until failed batches can supply durable usage receipts.
             let record = match managed.record_cost(held, &cost).await {
@@ -1353,7 +1402,7 @@ async fn run_worker(
                 }
             };
             drop(accounting);
-            let explanation = if error.reported_cost().is_none() {
+            let explanation = if unknown {
                 " Remaining budget is reserved because usage was not reported."
             } else {
                 ""

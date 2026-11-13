@@ -439,12 +439,24 @@ receive `forbidden`, and so do worker peers (above). Each checks that the
 agent's owner and origin match the local person for a local project, or the
 signed-in hub login for a hub project.
 
-- `agent_launch {project, name, root?, model?, budget_usd?}` makes a worktree
+- `agent_launch {project, name, root?, model?, role?, budget_usd?, no_budget?,
+  color?}` makes a worktree
   on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
-  `managed/<identity>/agent.json`. The agent starts `idle`.
+  `managed/<identity>/agent.json`. The agent starts `idle`. Without
+  `budget_usd` the cap is 5 USD. `no_budget: true` launches with no cap
+  instead (giving both is refused): its batches run without
+  `--max-budget-usd`, `agent_budget` refuses it, and a batch that ends
+  without reporting its cost charges nothing. Only this call can ask;
+  `child_launch` has no such field. A child of a no-budget agent inherits
+  no budget unless it names a `budget_usd` of its own, and reserves nothing
+  from its parent. A `budget_usd` too large to store is refused here rather
+  than read as no cap. `color` is a palette slot from 0 to 15
+  that the desktop draws the agent in; it stays on this machine.
 - `agent_list {project?}` answers `{"agents":[{identity, project, handle,
   state, model, budget_usd, spent_usd, worktree, branch, source, stopped_at,
-  resumable}]}`. `state`
+  resumable, no_budget?, color?}]}`. `no_budget` is `true` for an agent
+  launched with no cap, whose `budget_usd` is then the largest amount
+  (`18446744073709.551615`); `color` is present when one was picked. `state`
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
   `joined`. `stopped_at` is an RFC 3339 timestamp, or `null` while running
   or when unknown. Each transition to stopped writes

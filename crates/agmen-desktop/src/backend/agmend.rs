@@ -282,6 +282,7 @@ impl Live {
             if let Some(group) = snapshot.roster.iter_mut().find(|group| group.you) {
                 if let Some(row) = group.agents.iter_mut().find(|row| row.id == agent.identity) {
                     row.status = status;
+                    row.color = agent.color;
                 } else {
                     group.agents.push(AgentRow {
                         id: agent.identity.clone(),
@@ -297,6 +298,7 @@ impl Live {
                         status,
                         depth: 1,
                         item: None,
+                        color: agent.color,
                     });
                 }
             }
@@ -536,6 +538,10 @@ struct ManagedAgent {
     model: Option<String>,
     #[serde(default)]
     budget_usd: Option<String>,
+    #[serde(default)]
+    no_budget: bool,
+    #[serde(default)]
+    color: Option<u8>,
     #[serde(default)]
     spent_usd: Option<String>,
     #[serde(default)]
@@ -926,8 +932,11 @@ impl Backend for AgmendBackend {
                 name,
                 model,
                 budget_cents,
+                role,
+                color,
             } => {
-                let mut params = json!({"project": self.shared.project, "name": name, "model": model, "budget_usd": f64::from(budget_cents) / 100.0});
+                let mut params = launch_params(&name, &model, budget_cents, role, color);
+                params["project"] = json!(self.shared.project);
                 if let Some(root) = &self.shared.root {
                     params["root"] = json!(root);
                 }
@@ -1423,6 +1432,30 @@ fn context_notice(answer: &Value) -> Option<String> {
     }
 }
 
+/// `agent_launch`'s parameters for what New Agent chose. A role and a color
+/// are sent only when chosen. An agmend older than `no_budget` refuses a
+/// blank budget instead of capping it.
+fn launch_params(
+    name: &str,
+    model: &str,
+    budget_cents: Option<u32>,
+    role: Option<String>,
+    color: Option<u8>,
+) -> Value {
+    let mut params = json!({"name": name, "model": model});
+    match budget_cents {
+        Some(cents) => params["budget_usd"] = json!(f64::from(cents) / 100.0),
+        None => params["no_budget"] = json!(true),
+    }
+    if let Some(role) = role {
+        params["role"] = json!(role);
+    }
+    if let Some(color) = color {
+        params["color"] = json!(color);
+    }
+    params
+}
+
 /// A USD string from agmend as dollars. A missing, unparsable, negative or
 /// non-finite value is 0.0, so an older or malformed reply stays readable
 /// (the desktop has no logging to report it to).
@@ -1447,7 +1480,11 @@ fn agent_info(agent: &ManagedAgent, status: AgentStatus, work: &ManagedWork) -> 
         branch: work.branch.clone().unwrap_or_default(),
         worktree_state: work.worktree.clone().unwrap_or_default(),
         spent_usd: usd(agent.spent_usd.as_deref()),
-        budget_usd: usd(agent.budget_usd.as_deref()),
+        budget_usd: if agent.no_budget {
+            f64::INFINITY
+        } else {
+            usd(agent.budget_usd.as_deref())
+        },
         // These fields have no live source yet.
         delegated_by: None,
         tools: Vec::new(),
@@ -2128,6 +2165,7 @@ fn agent_row(entry: &RosterEntry, roster: &[RosterEntry]) -> AgentRow {
         },
         depth: depth(entry, roster),
         item: None,
+        color: None,
     }
 }
 

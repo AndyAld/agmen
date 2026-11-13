@@ -196,9 +196,10 @@ fn sender(env: &StampedEnvelope, context: &ChatContext) -> Sender {
             IdentityKind::Human | IdentityKind::Agent | IdentityKind::Hub => None,
         })
         .map(str::to_owned);
+    let slot = context.color(&env.from_handle);
     let (label, color) = role.map_or_else(
-        || ("agent".to_owned(), Color::Role("engineer".into())),
-        |role| (title_case(&role), Color::Role(role.into())),
+        || ("agent".to_owned(), Color::agent(slot, "engineer")),
+        |role| (title_case(&role), Color::agent(slot, &role)),
     );
     Sender {
         label,

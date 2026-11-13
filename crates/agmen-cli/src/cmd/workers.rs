@@ -231,7 +231,12 @@ pub(crate) async fn workers(args: WorkersArgs) -> Result<()> {
             clean(field(agent, "identity")?),
             clean(field(agent, "branch")?),
             clean(field(agent, "spent_usd")?),
-            clean(field(agent, "budget_usd")?),
+            // An agent launched with no budget reports the largest amount as its cap.
+            if agent.get("no_budget") == Some(&Value::Bool(true)) {
+                "none".into()
+            } else {
+                clean(field(agent, "budget_usd")?)
+            },
             clean(role)
         );
     }

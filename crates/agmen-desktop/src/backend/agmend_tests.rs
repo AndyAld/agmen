@@ -523,6 +523,58 @@ fn agent_panel_shows_spend_against_cap() {
 }
 
 #[test]
+fn launch_sends_no_budget_role_and_color_when_chosen() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    backend
+        .act(Action::LaunchAgent {
+            name: "worker".into(),
+            model: "opus".into(),
+            budget_cents: None,
+            role: Some("engineer".into()),
+            color: Some(3),
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    assert_eq!(
+        fake.state.lock().unwrap().agent_requests[0].params,
+        json!({"project": PROJECT, "name": "worker", "model": "opus",
+               "no_budget": true, "role": "engineer", "color": 3})
+    );
+}
+
+#[test]
+fn no_budget_agent_has_no_cap_and_keeps_its_color() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idmanaged", "project": PROJECT,
+            "handle": "andy/worker", "state": "idle",
+            "budget_usd": "18446744073709.551615", "no_budget": true,
+            "spent_usd": "1.25", "color": 3
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let snapshot = backend.snapshot();
+    let agent = &snapshot.agents[&ident("idmanaged")];
+    assert!(agent.budget_usd.is_infinite());
+    let row = snapshot
+        .roster
+        .iter()
+        .flat_map(|group| &group.agents)
+        .find(|row| row.id == ident("idmanaged"))
+        .unwrap();
+    assert_eq!(row.color, Some(3));
+}
+
+#[test]
 fn older_agent_list_without_spend_still_parses() {
     let fake = FakeAgmend::start(console(vec![]));
     fake.edit(|state| {
@@ -1594,7 +1646,9 @@ fn managed_agent_actions_use_local_launch_and_stop() {
         .act(Action::LaunchAgent {
             name: "worker".into(),
             model: "sonnet".into(),
-            budget_cents: 500,
+            budget_cents: Some(500),
+            role: None,
+            color: None,
         })
         .unwrap();
     wait_for(&mut updates, |update| {

@@ -136,6 +136,8 @@ struct Stored {
     depth: u32,
     #[serde(default)]
     shared_budget: bool,
+    #[serde(default)]
+    color: Option<u8>,
 }
 
 impl Stored {
@@ -181,6 +183,7 @@ impl Stored {
                 parent: self.parent,
                 depth: self.depth,
                 shared_budget: self.shared_budget,
+                color: self.color,
             },
             migrated,
         ))
@@ -674,6 +677,7 @@ impl Managed {
             parent: None,
             depth: root_depth(),
             shared_budget: false,
+            color: None,
         };
         self.save_record(&record).await?;
         let cap = Money::from_usd(JOINED_BUDGET_USD).map_err(|_| error("invalid budget"))?;
