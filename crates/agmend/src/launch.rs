@@ -42,6 +42,15 @@ impl Provider {
         }
     }
 
+    /// The name New Agent's Provider list shows: whose models it runs, where
+    /// that differs from the program.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Anthropic",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
     /// The HELLO `agent` value.
     pub(crate) const fn agent(self) -> &'static str {
         match self {
@@ -57,6 +66,31 @@ impl Provider {
         }
     }
 }
+
+/// The effort levels a launch may name: Claude Code's `--effort` values, which
+/// OpenCode takes as a model variant (checked against Claude Code 2.1.323 and
+/// OpenCode 2.2.6).
+pub(crate) const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Anthropic's generally available models, newest first in each family, as
+/// `agent_providers` lists them for Claude Code.
+// shortcut: Claude Code prints no model list, so this one is kept by hand
+// (as of 2026-11-13); add a model here when Anthropic ships one.
+const ANTHROPIC_MODELS: [&str; 13] = [
+    "claude-fable-5-2",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-5-5",
+    "claude-haiku-4-5",
+];
 
 /// Whether `model` is a plain model name: 1 to 128 letters, digits or
 /// `. - _ : [ ] / @`, not starting with a hyphen.
@@ -86,6 +120,8 @@ pub(crate) struct RunSpec {
     pub(crate) session_id: String,
     pub(crate) resume: bool,
     pub(crate) model: Option<String>,
+    /// One of [`EFFORTS`], when the person picked one.
+    pub(crate) effort: Option<String>,
     pub(crate) budget_remaining: String,
     /// An explicit batch cap; absent means the full remaining budget.
     pub(crate) budget_cap: Option<Money>,
@@ -166,6 +202,9 @@ impl RunSpec {
         }
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = &self.effort {
+            args.extend(["--effort".into(), effort.clone()]);
         }
         if let Some(role) = &self.role {
             args.extend([
@@ -621,14 +660,14 @@ impl Runner for ClaudeRunner {
                     continue;
                 };
                 let models = match provider {
-                    // Claude Code prints no model list; the desktop offers its usual names.
-                    Provider::Claude => Vec::new(),
+                    Provider::Claude => ANTHROPIC_MODELS.map(Into::into).into(),
                     Provider::OpenCode => {
                         opencode::models(&environment.program, &environment.path).await
                     }
                 };
                 found.push(serde_json::json!({
-                    "name": provider, "title": provider.title(), "models": models,
+                    "name": provider, "title": provider.label(), "models": models,
+                    "efforts": EFFORTS,
                 }));
             }
             found

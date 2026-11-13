@@ -16,9 +16,18 @@ use gpui::{
 };
 
 /// The provider agmend launches as a managed agent.
-const CLAUDE_CODE: &str = "Claude Code";
+const ANTHROPIC: &str = "Anthropic";
 /// Claude Code's model names, offered when agmend lists none for it.
 const CLAUDE_MODELS: [&str; 3] = ["sonnet", "opus", "haiku"];
+/// The Effort options and what each sends; the first leaves the model's own.
+const EFFORTS: [(&str, Option<&str>); 6] = [
+    ("default", None),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", Some("high")),
+    ("extra high", Some("xhigh")),
+    ("max", Some("max")),
+];
 /// The Role option that launches with no role.
 const GENERAL_PURPOSE: &str = "general-purpose";
 /// The most palette colors offered; Zed themes carry eight players.
@@ -41,7 +50,35 @@ struct Provider {
 enum Pick {
     Provider,
     Model,
+    Effort,
     Role,
+}
+
+/// An Anthropic model id as its name: `claude-opus-5-5` reads "Opus 5.5" and
+/// `claude-fable-5-2-fast` "Fable 5.2 fast". Any other name, an alias such
+/// as `sonnet` included, stays as it is.
+fn model_label(id: &str) -> SharedString {
+    let Some((family, rest)) = id
+        .strip_prefix("claude-")
+        .and_then(|name| name.split_once('-'))
+        .filter(|(family, _)| family.is_ascii() && !family.is_empty())
+    else {
+        return id.to_owned().into();
+    };
+    let (version, extra): (Vec<&str>, Vec<&str>) = rest
+        .split('-')
+        .partition(|part| part.len() < 3 && part.bytes().all(|byte| byte.is_ascii_digit()));
+    let (first, others) = family.split_at(1);
+    let mut label = format!(
+        "{}{others} {}",
+        first.to_ascii_uppercase(),
+        version.join(".")
+    );
+    for part in extra {
+        label.push(' ');
+        label.push_str(part);
+    }
+    label.into()
 }
 
 pub(crate) struct Closed;
@@ -54,6 +91,8 @@ pub(crate) struct NewAgentDialog {
     roles: Vec<SharedString>,
     provider: usize,
     model: usize,
+    /// An index into [`EFFORTS`].
+    effort: usize,
     role: usize,
     /// The palette slot picked; `None` follows the role's color.
     color: Option<u8>,
@@ -74,7 +113,7 @@ fn claude(default_model: &str, listed: &[String]) -> Provider {
         models.insert(0, default_model.to_owned().into());
     }
     Provider {
-        title: CLAUDE_CODE.into(),
+        title: ANTHROPIC.into(),
         name: None,
         launchable: true,
         own_default: false,
@@ -96,6 +135,7 @@ impl NewAgentDialog {
             roles: vec![GENERAL_PURPOSE.into()],
             provider: 0,
             model: 0,
+            effort: 0,
             role: 0,
             color: None,
             open: None,
@@ -204,6 +244,7 @@ impl NewAgentDialog {
                 self.error = None;
             }
             Pick::Model => self.model = index,
+            Pick::Effort => self.effort = index,
             Pick::Role => self.role = index,
         }
     }
@@ -214,7 +255,7 @@ impl NewAgentDialog {
         };
         if !provider.launchable {
             self.error = Some(format!(
-                "agmen cannot launch {} agents yet. Choose a provider it can launch, such as {CLAUDE_CODE}.",
+                "agmen cannot launch {} agents yet. Choose a provider it can launch, such as {ANTHROPIC}.",
                 provider.title
             ));
             cx.notify();
@@ -244,6 +285,15 @@ impl NewAgentDialog {
             cx.notify();
             return;
         };
+        let effort = EFFORTS
+            .get(self.effort)
+            .and_then(|(_, sent)| sent.map(str::to_owned));
+        // OpenCode takes an effort as a variant of a named model.
+        if effort.is_some() && model.is_none() {
+            self.error = Some("Pick a model to use an effort with this provider.".into());
+            cx.notify();
+            return;
+        }
         // The first option is general-purpose: no role.
         let role = self
             .roles
@@ -260,6 +310,7 @@ impl NewAgentDialog {
                         name,
                         provider,
                         model,
+                        effort,
                         budget_cents,
                         role,
                         color: self.color,
@@ -373,10 +424,14 @@ fn budget_cents(raw: &str) -> Option<u32> {
 impl Render for NewAgentDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let providers = self.providers.iter().map(|p| p.title.clone()).collect();
+        // Anthropic's models read by name; OpenCode's keep their provider/model ids.
         let models = self
             .providers
             .get(self.provider)
-            .map(|provider| provider.models.clone())
+            .map(|provider| match provider.name {
+                None => provider.models.iter().map(|id| model_label(id)).collect(),
+                Some(_) => provider.models.clone(),
+            })
             .unwrap_or_default();
         Modal::small("new-agent")
             .on_dismiss(cx.listener(|_, _, _, cx| cx.emit(Closed)))
@@ -403,6 +458,15 @@ impl Render for NewAgentDialog {
                     "new-agent:model",
                     models,
                     self.model,
+                    cx,
+                )),
+            )
+            .child(
+                Field::new("new-agent:effort-field", "Effort").child(self.dropdown(
+                    Pick::Effort,
+                    "new-agent:effort",
+                    EFFORTS.iter().map(|(label, _)| (*label).into()).collect(),
+                    self.effort,
                     cx,
                 )),
             )
@@ -487,6 +551,7 @@ mod interaction_tests {
                 name: "worker".into(),
                 provider: None,
                 model: Some("opus".into()),
+                effort: None,
                 budget_cents: Some(1250),
                 role: None,
                 color: None,
@@ -540,6 +605,7 @@ mod interaction_tests {
                 name: "worker".into(),
                 provider: None,
                 model: Some(model),
+                effort: None,
                 budget_cents: None,
                 role: Some(role),
                 color: Some(2),
@@ -555,7 +621,7 @@ mod interaction_tests {
             NewAgentDialog::new("sonnet".into(), None, cx).choices(&snapshot)
         });
         let other = dialog.read_with(cx, |dialog, _| {
-            assert_eq!(dialog.providers[0].title, CLAUDE_CODE);
+            assert_eq!(dialog.providers[0].title, ANTHROPIC);
             assert!(dialog.providers.len() > 1, "the fixture has other agents");
             dialog.providers[1].title.to_string()
         });
@@ -582,7 +648,7 @@ mod interaction_tests {
         snapshot.launch_providers = vec![
             LaunchProvider {
                 name: "claude".into(),
-                title: CLAUDE_CODE.into(),
+                title: ANTHROPIC.into(),
                 models: Vec::new(),
             },
             LaunchProvider {
@@ -622,6 +688,7 @@ mod interaction_tests {
             name: String::new(),
             provider: Some("opencode".into()),
             model: model.map(Into::into),
+            effort: None,
             budget_cents: None,
             role: None,
             color: None,
@@ -629,6 +696,77 @@ mod interaction_tests {
         assert_eq!(
             *backend.acts.borrow(),
             vec![launch(None), launch(Some("anthropic/claude-haiku-5-5"))]
+        );
+    }
+
+    #[test]
+    fn anthropic_model_ids_read_by_name_and_other_names_stay() {
+        for (id, label) in [
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-opus-4-6", "Opus 4.6"),
+            ("claude-fable-5", "Fable 5"),
+            ("claude-haiku-4-5", "Haiku 4.5"),
+            ("claude-fable-5-2-fast", "Fable 5.2 fast"),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5 20251001"),
+            ("sonnet", "sonnet"),
+            ("anthropic/claude-haiku-5-5", "anthropic/claude-haiku-5-5"),
+            ("claude-", "claude-"),
+        ] {
+            assert_eq!(model_label(id), label, "{id}");
+        }
+    }
+
+    #[gpui::test]
+    fn effort_and_a_named_anthropic_model_reach_the_launch(cx: &mut TestAppContext) {
+        use crate::backend::LaunchProvider;
+        let (backend, _) = plan_globals(cx, Screen::Plan, None);
+        let mut snapshot = backend.snapshot();
+        snapshot.launch_providers = vec![
+            LaunchProvider {
+                name: "claude".into(),
+                title: ANTHROPIC.into(),
+                models: vec!["claude-fable-5-2".into(), "claude-opus-5-5".into()],
+            },
+            LaunchProvider {
+                name: "opencode".into(),
+                title: "OpenCode".into(),
+                models: vec!["anthropic/claude-haiku-5-5".into()],
+            },
+        ];
+        let (dialog, cx) = cx.add_window_view(|_, cx| {
+            NewAgentDialog::new("sonnet".into(), None, cx).choices(&snapshot)
+        });
+        dialog.read_with(cx, |dialog, _| {
+            assert_eq!(dialog.providers[0].title, "Anthropic");
+            // The person's default alias first, then agmend's list.
+            assert_eq!(
+                dialog.providers[0].models,
+                ["sonnet", "claude-fable-5-2", "claude-opus-5-5"]
+            );
+        });
+        click(cx, "new-agent:model");
+        click(cx, "new-agent:model:2");
+        click(cx, "new-agent:effort");
+        // "extra high" sends Claude Code's word for it.
+        click(cx, "new-agent:effort:4");
+        click(cx, "new-agent:launch");
+        // OpenCode's own default model has no variant to carry an effort.
+        click(cx, "new-agent:provider");
+        click(cx, "new-agent:provider:1");
+        click(cx, "new-agent:launch");
+        let error = dialog.read_with(cx, |dialog, _| dialog.error.clone().unwrap());
+        assert!(error.contains("Pick a model"), "{error}");
+        assert_eq!(
+            *backend.acts.borrow(),
+            vec![Action::LaunchAgent {
+                name: String::new(),
+                provider: None,
+                model: Some("claude-opus-5-5".into()),
+                effort: Some("xhigh".into()),
+                budget_cents: None,
+                role: None,
+                color: None,
+            }]
         );
     }
 }

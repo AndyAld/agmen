@@ -20,6 +20,7 @@ fn field_puts_its_label_close_to_its_control(cx: &mut TestAppContext) {
         ("new-agent:name-field:label", "new-agent:name"),
         ("new-agent:provider-field:label", "new-agent:provider"),
         ("new-agent:model-field:label", "new-agent:model"),
+        ("new-agent:effort-field:label", "new-agent:effort"),
         ("new-agent:role-field:label", "new-agent:role"),
         ("new-agent:color-field:label", "new-agent:color"),
         ("new-agent:budget-field:label", "new-agent:budget"),
@@ -48,6 +49,11 @@ fn new_agent_labels_sit_closer_to_their_own_field_than_to_the_one_above(cx: &mut
         ),
         (
             "new-agent:model",
+            "new-agent:effort-field:label",
+            "new-agent:effort",
+        ),
+        (
+            "new-agent:effort",
             "new-agent:role-field:label",
             "new-agent:role",
         ),

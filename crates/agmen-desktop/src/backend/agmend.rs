@@ -941,11 +941,13 @@ impl Backend for AgmendBackend {
                 name,
                 provider,
                 model,
+                effort,
                 budget_cents,
                 role,
                 color,
             } => {
-                let mut params = launch_params(&name, provider, model, budget_cents, role, color);
+                let run = (model, effort);
+                let mut params = launch_params(&name, provider, run, budget_cents, role, color);
                 params["project"] = json!(self.shared.project);
                 if let Some(root) = &self.shared.root {
                     params["root"] = json!(root);
@@ -1452,13 +1454,13 @@ fn context_notice(answer: &Value) -> Option<String> {
 fn launch_params(
     name: &str,
     provider: Option<String>,
-    model: Option<String>,
+    (model, effort): (Option<String>, Option<String>),
     budget_cents: Option<u32>,
     role: Option<String>,
     color: Option<u8>,
 ) -> Value {
-    let mut params =
-        json!({"name": name, "provider": provider, "model": model, "role": role, "color": color});
+    let mut params = json!({"name": name, "provider": provider, "model": model,
+        "effort": effort, "role": role, "color": color});
     match budget_cents {
         Some(cents) => params["budget_usd"] = json!(f64::from(cents) / 100.0),
         None => params["no_budget"] = json!(true),

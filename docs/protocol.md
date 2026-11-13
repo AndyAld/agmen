@@ -441,8 +441,8 @@ receive `forbidden`, and so do worker peers (above). Each checks that the
 agent's owner and origin match the local person for a local project, or the
 signed-in hub login for a hub project.
 
-- `agent_launch {project, name, root?, model?, role?, budget_usd?, no_budget?,
-  color?, provider?}` makes a worktree
+- `agent_launch {project, name, root?, model?, effort?, role?, budget_usd?,
+  no_budget?, color?, provider?}` makes a worktree
   on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
   `managed/<identity>/agent.json`. The agent starts `idle`. Without
   `budget_usd` the cap is 5 USD. `no_budget: true` launches with no cap
@@ -457,6 +457,9 @@ signed-in hub login for a hub project.
   is `claude` (the default) or `opencode`, the coding agent every batch of
   this agent runs on; a child launched by the agent runs on the same one.
   Without `model`, Claude Code runs `sonnet` and OpenCode its own default.
+  `effort` is `low`, `medium`, `high`, `xhigh` or `max`: Claude Code gets it
+  as `--effort`, and OpenCode as the model's variant (`provider/model#high`),
+  so an OpenCode effort needs a `model`. Without it the model's own applies.
   An OpenCode batch runs `opencode run --standalone --format json` with a
   per-batch config (the agmen MCP server, permission rules for the role and
   for batches from others, and the instruction files). A batch from others
@@ -469,12 +472,15 @@ signed-in hub login for a hub project.
   path edit limit is not enforced on OpenCode (only an edit scope of none
   is, by withholding the edit tool), and `agent_attach` refuses an OpenCode
   agent.
-- `agent_providers {}` answers `{"providers":[{name, title, models}]}`: the
-  coding agents found on the login PATH that `agent_launch` can run.
-  `models` is what `opencode models` lists, and empty for Claude Code.
+- `agent_providers {}` answers `{"providers":[{name, title, models,
+  efforts}]}`: the coding agents found on the login PATH that `agent_launch`
+  can run. Claude Code is titled `Anthropic`, after whose models it runs, and
+  lists Anthropic's generally available model ids (a list kept in agmend);
+  OpenCode lists what `opencode models` prints. `efforts` are the levels
+  `effort` takes.
 - `agent_list {project?}` answers `{"agents":[{identity, project, handle,
   state, model, budget_usd, spent_usd, worktree, branch, source, stopped_at,
-  resumable, no_budget?, color?, provider}]}`. `no_budget` is `true` for an agent
+  resumable, no_budget?, color?, provider, effort?}]}`. `no_budget` is `true` for an agent
   launched with no cap, whose `budget_usd` is then the largest amount
   (`18446744073709.551615`); `color` is present when one was picked. `state`
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or

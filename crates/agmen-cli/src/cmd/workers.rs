@@ -25,6 +25,9 @@ pub(crate) struct LaunchArgs {
     /// The coding agent to run it on: claude (the default) or opencode.
     #[arg(long)]
     provider: Option<String>,
+    /// How hard the model works: low, medium, high, xhigh or max.
+    #[arg(long)]
+    effort: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -112,9 +115,9 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     if credential.is_some() && args.role.is_none() {
         return Err(Fail::usage("--role is required for an agent's launch").into());
     }
-    if credential.is_some() && args.provider.is_some() {
+    if credential.is_some() && (args.provider.is_some() || args.effort.is_some()) {
         return Err(Fail::usage(
-            "--provider does not apply to an agent's launch: the child runs on its parent's coding agent",
+            "--provider and --effort do not apply to an agent's launch: the child runs on its parent's coding agent at the model's own effort",
         )
         .into());
     }
@@ -147,6 +150,9 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     }
     if let Some(provider) = args.provider {
         params["provider"] = json!(provider);
+    }
+    if let Some(effort) = args.effort {
+        params["effort"] = json!(effort);
     }
     let answer = send_launch(&mut daemon, credential, params).await?;
     println!(

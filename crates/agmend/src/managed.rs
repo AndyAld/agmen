@@ -57,6 +57,8 @@ pub(crate) struct Launch {
     /// The coding agent to run it on; Claude Code when absent.
     #[serde(default)]
     provider: Provider,
+    /// One of `launch::EFFORTS`; the model's own default when absent.
+    effort: Option<String>,
 }
 
 /// The branch and folder a launch created for its worker.
@@ -118,6 +120,8 @@ struct Record {
     /// The coding agent it runs on.
     #[serde(default)]
     provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
 }
 
 fn root_depth() -> u32 {
@@ -340,6 +344,17 @@ impl Managed {
                 .map_or_else(|| "5".into(), ToString::to_string),
         )
         .map_err(error)?;
+        if let Some(effort) = &launch.effort {
+            if !crate::launch::EFFORTS.contains(&effort.as_str()) {
+                return Err(bad_request(
+                    "effort must be one of low, medium, high, xhigh or max",
+                ));
+            }
+            // OpenCode takes the effort as a variant of a named model.
+            if launch.provider == Provider::OpenCode && launch.model.is_none() {
+                return Err(bad_request("an OpenCode effort needs a model to apply to"));
+            }
+        }
         // OpenCode names a model as provider/model; any other name fails every batch.
         if launch.provider == Provider::OpenCode
             && launch
@@ -494,6 +509,7 @@ impl Managed {
             shared_budget,
             color: launch.color,
             provider: launch.provider,
+            effort: launch.effort,
         };
         let record_layer = record.role_layer.clone();
         let local_token = identities.local_token(&identity.identity_id).await?;
@@ -829,6 +845,7 @@ impl Managed {
             session_id,
             resume,
             model: held.record.model.clone(),
+            effort: held.record.effort.clone(),
             budget_remaining: held.budget.remaining_usd(),
             budget_cap: Some(batch_cap),
             cap_budget,
@@ -913,6 +930,9 @@ impl Managed {
                 entry["color"] = json!(color);
             }
             entry["provider"] = json!(record.provider);
+            if let Some(effort) = &record.effort {
+                entry["effort"] = json!(effort);
+            }
             // One roster read per local project, not per agent: the desktop polls this.
             let resumable = if agmen_client::is_local(&record.identity.hub_url) {
                 let members = match local_members.entry(record.identity.project.clone()) {

@@ -46,7 +46,13 @@ pub(super) fn args(spec: &RunSpec) -> Vec<String> {
     // `--session` continues the session or creates it, so `resume` is not needed.
     args.push(session(&spec.session_id));
     if let Some(model) = &spec.model {
-        args.extend(["--model".into(), model.clone()]);
+        // OpenCode takes an effort as the model's variant, and refuses one
+        // the model does not offer.
+        let variant = spec.effort.iter().map(|effort| format!("#{effort}"));
+        args.extend([
+            "--model".into(),
+            std::iter::once(model.clone()).chain(variant).collect(),
+        ]);
     }
     // An owner batch approves what the rules below do not deny. Without it
     // OpenCode rejects every ask, which is what a batch from others gets.
