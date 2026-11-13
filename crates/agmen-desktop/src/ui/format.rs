@@ -6,6 +6,14 @@ use agmen_proto::Timestamp;
 use crate::backend::ListenerInfo;
 use jiff::tz::TimeZone;
 
+/// `path` with the home folder written as `~`.
+pub(crate) fn tilde(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// Dollars with cents: `$14.20`. Values that are not finite show `$0.00`.
 #[must_use]
 pub(crate) fn money(usd: f64) -> String {

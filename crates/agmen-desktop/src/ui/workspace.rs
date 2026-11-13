@@ -101,6 +101,8 @@ pub(crate) struct Workspace {
     _chat_changes: Subscription,
     /// Keeps the shortcuts alive when the focused control leaves the tree.
     _focus_lost: Subscription,
+    /// The status bar's words for the folder this window opened in.
+    folder: Option<String>,
 }
 
 impl Workspace {
@@ -217,6 +219,7 @@ impl Workspace {
             chat,
             _chat_changes: chat_changes,
             _focus_lost: focus_lost,
+            folder: None,
         }
     }
 
@@ -261,6 +264,12 @@ impl Workspace {
                 )
             });
         }
+    }
+
+    /// Shows `folder` (see `status_bar::folder_label`) in the status bar.
+    pub(super) fn set_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        self.folder = Some(folder);
+        cx.notify();
     }
 
     pub(super) fn set_invite_people(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -510,6 +519,7 @@ impl Render for Workspace {
                 .panels(self.panel_buttons(cx))
                 .alert_counts(self.chat.read(cx).alert_counts())
                 .when_some(self.status_context(cx), StatusBar::context)
+                .when_some(self.folder.clone(), StatusBar::folder)
                 .palette_open(self.is_palette_open()),
         )
         .children(palette)

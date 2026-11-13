@@ -33,6 +33,8 @@ pub(crate) struct StatusBar {
     alerts: AlertCounts,
     /// Task 7: the live link's state and its color; `None` draws nothing.
     link: Option<(SharedString, Color)>,
+    /// The checkout this window opened, as [`folder_label`] words it.
+    folder: Option<SharedString>,
 }
 
 impl StatusBar {
@@ -46,7 +48,15 @@ impl StatusBar {
             palette_open: false,
             alerts: AlertCounts::default(),
             link: None,
+            folder: None,
         }
+    }
+
+    /// The folder agmen opened in, shown after the worktree count.
+    #[must_use]
+    pub(crate) fn folder(mut self, folder: impl Into<SharedString>) -> Self {
+        self.folder = Some(folder.into());
+        self
     }
 
     /// Task 7: the link to agmend and the hub, as [`link_label`] words it.
@@ -107,6 +117,19 @@ pub(crate) fn link_label(link: &Link, was_live: bool) -> (SharedString, Color) {
             Color::Error,
         ),
     }
+}
+
+/// The opened checkout with the home folder as `~`, or `no folder` when a
+/// saved project reopened without one.
+#[must_use]
+pub(crate) fn folder_label(
+    root: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> String {
+    root.map_or_else(
+        || "no folder".to_owned(),
+        |root| super::format::tilde(root, home),
+    )
 }
 
 /// The right-side buttons; the gear opens Settings.
@@ -199,6 +222,11 @@ impl RenderOnce for StatusBar {
                 Color::Placeholder,
                 counted(s.worktrees, "worktree", "worktrees"),
             ))
+            .when_some(self.folder, |this, folder| {
+                this.child(
+                    StatusItem::new("status-folder", "⌂", Color::Placeholder, folder).truncate(),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div().debug_selector(|| "status-context".into()).child(
@@ -457,5 +485,41 @@ mod tests {
         // bar reads "listener codex · idle" (console.py:815).
         let bar = StatusBar::new(&crate::backend::chat_snapshot(), false);
         assert_eq!(bar.context.as_ref(), "listener codex · idle");
+    }
+
+    #[test]
+    fn folder_label_names_the_opened_checkout() {
+        use std::path::Path;
+        let home = Path::new("/Users/andy");
+        assert_eq!(
+            folder_label(Some(Path::new("/Users/andy/Projects/demo")), Some(home)),
+            "~/Projects/demo"
+        );
+        assert_eq!(
+            folder_label(Some(Path::new("/srv/demo")), Some(home)),
+            "/srv/demo"
+        );
+        // A saved project reopened without its folder says so.
+        assert_eq!(folder_label(None, Some(home)), "no folder");
+    }
+
+    #[gpui::test]
+    fn the_folder_sits_after_the_worktrees_and_truncates(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{draw, redraw};
+        let cx = draw(cx, || {
+            div()
+                .w(gpui::px(1300.))
+                .child(
+                    StatusBar::new(&crate::backend::chat_snapshot(), false)
+                        .folder(format!("~/{}", "deep/".repeat(200))),
+                )
+                .into_any_element()
+        });
+        redraw(cx);
+        let folder = cx.debug_bounds("status-folder").expect("folder item");
+        let worktrees = cx.debug_bounds("status-worktrees").unwrap();
+        assert!(worktrees.right() <= folder.left());
+        assert!(cx.debug_bounds("status-folder:label").unwrap().right() <= folder.right());
+        assert!(cx.debug_bounds("palette-trigger").unwrap().right() <= gpui::px(1300.));
     }
 }

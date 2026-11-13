@@ -30,14 +30,6 @@ pub(super) fn font_label(family: &str) -> String {
     }
 }
 
-/// `path` with the home folder written as `~`.
-pub(super) fn tilde(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
-}
-
 /// The credit line of an installed theme: who made it and where it is from.
 pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
     let manifest = match &theme.origin {

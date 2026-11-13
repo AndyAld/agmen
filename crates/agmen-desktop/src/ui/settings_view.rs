@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use self::rows::{
-    browse_row, controls, density_row, font_label, icon_preview, row, setting, size_stepper, tilde,
+    browse_row, controls, density_row, font_label, icon_preview, row, setting, size_stepper,
 };
 use super::components::{
     Breadcrumb, Button, ButtonStyle, Color, Dropdown, EmptyState, Field, Icon, IconSize, Indent,
@@ -940,7 +940,7 @@ impl SettingsView {
     fn footer(&self) -> AnyElement {
         let saved_to = format!(
             "Saved to {}. The terminal UI reads the same file; there, :set theme=\u{2026} and :set icons=nerd|none change it, and the font is your terminal's.",
-            tilde(&self.sources.settings_path(), self.sources.config.parent())
+            super::format::tilde(&self.sources.settings_path(), self.sources.config.parent())
         );
         // Right under the last rule, as node 8214 (V102).
         div()

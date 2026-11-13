@@ -527,6 +527,9 @@ impl LiveRoot {
         // The chat subscribes to the global when it is built.
         cx.set_global(BackendHandle(backend));
         let workspace = cx.new(|cx| Workspace::live(snapshot, window, cx));
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let folder = super::status_bar::folder_label(self.launch.root.as_deref(), home.as_deref());
+        workspace.update(cx, |workspace, cx| workspace.set_folder(folder, cx));
         window.focus(&workspace.focus_handle(cx), cx);
         self.state = LiveState::Open(workspace);
         self.remember(project.clone(), cx);
