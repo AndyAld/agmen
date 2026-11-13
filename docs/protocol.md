@@ -308,7 +308,9 @@ with the hub-stamped owner ID and `from_kind: human` get
 so other senders' messages do not enter that context through the inbox tool.
 Bash in those batches can still run `agmen inbox`. Other batches use `--permission-mode
 default`, `--disallowedTools Bash,Edit,Write,NotebookEdit` (deny rules override
-allow rules in the user's and project's Claude Code settings) and an appended
+allow rules in the user's and project's Claude Code settings), `--allowedTools`
+for the four reply tools `chat`, `answer`, `ask` and `dm` (a `-p` run cannot
+ask for approval, so default mode would refuse them) and an appended
 instruction to read, think and reply through agmen, without running commands or
 editing files, and wait for the owner if changes are needed.
 

@@ -83,6 +83,14 @@ impl RunSpec {
             }
             .into(),
         ]);
+        if !self.owner_only {
+            // `-p` cannot ask for approval, so default mode refuses every agmen
+            // tool; allow only the ones that send a reply (inbox stays out).
+            args.extend([
+                "--allowedTools".into(),
+                "mcp__agmen__chat,mcp__agmen__answer,mcp__agmen__ask,mcp__agmen__dm".into(),
+            ]);
+        }
         args.extend(["--output-format".into(), "json".into()]);
         if self.cap_budget {
             args.extend([

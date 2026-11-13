@@ -73,7 +73,7 @@ fn launch_without_role_keeps_todays_args() {
             if !owner_only {
                 system.push_str(" This batch includes messages from people other than your owner. You cannot run commands or edit files in this batch; read, think and reply in the chat with the agmen tools. If the request needs changes, say so and wait for your owner.");
             }
-            let expected = vec![
+            let mut expected = vec![
                 "-p",
                 &request.prompt,
                 if resume { "--resume" } else { "--session-id" },
@@ -90,6 +90,14 @@ fn launch_without_role_keeps_todays_args() {
                 } else {
                     "Bash,Edit,Write,NotebookEdit"
                 },
+            ];
+            if !owner_only {
+                expected.extend([
+                    "--allowedTools",
+                    "mcp__agmen__chat,mcp__agmen__answer,mcp__agmen__ask,mcp__agmen__dm",
+                ]);
+            }
+            expected.extend([
                 "--output-format",
                 "json",
                 "--max-budget-usd",
@@ -101,7 +109,7 @@ fn launch_without_role_keeps_todays_args() {
                 &system,
                 "--model",
                 "sonnet",
-            ];
+            ]);
             assert_eq!(request.args(), expected);
         }
     }
@@ -456,6 +464,26 @@ fn other_sender_batch_uses_default_permissions_and_restriction() {
     let deny = args.iter().position(|a| a == "--disallowedTools").unwrap();
     assert_eq!(args[deny + 1], "Bash,Edit,Write,NotebookEdit");
     assert!(args[deny + 2].starts_with("--"));
+}
+
+#[test]
+fn other_sender_batch_may_reply_through_agmen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = spec(dir.path());
+    request.owner_only = false;
+    let args = request.args();
+    // `-p` cannot prompt, so without this the reply tools are refused and the
+    // batch ends with no answer in the chat.
+    let allow = args.iter().position(|a| a == "--allowedTools").unwrap();
+    assert_eq!(
+        args[allow + 1],
+        "mcp__agmen__chat,mcp__agmen__answer,mcp__agmen__ask,mcp__agmen__dm"
+    );
+    assert!(args[allow + 2].starts_with("--"));
+    assert_eq!(args.iter().filter(|a| *a == "--allowedTools").count(), 1);
+    // bypassPermissions needs no allow list.
+    request.owner_only = true;
+    assert!(!request.args().iter().any(|a| a == "--allowedTools"));
 }
 
 #[test]
