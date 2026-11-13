@@ -5,6 +5,9 @@ use super::*;
 #[path = "launch_peer_tests.rs"]
 mod peer_ancestry;
 
+#[path = "launch_opencode_tests.rs"]
+mod opencode_runs;
+
 #[test]
 fn launch_renders_role_and_tools() {
     use std::io::Read as _;
@@ -16,6 +19,7 @@ fn launch_renders_role_and_tools() {
     let mut request = spec(dir.path());
     request.role = Some(RoleRun {
         tools: agmen_roles::claude_tools(role).join(","),
+        actions: Vec::new(),
         prompt_file: path.clone(),
     });
     let args = request.args();
@@ -45,6 +49,7 @@ fn role_args_keep_the_disallowed_tools() {
         request.owner_only = owner_only;
         request.role = Some(RoleRun {
             tools: String::new(),
+            actions: Vec::new(),
             prompt_file: dir.path().join("role-prompt.md"),
         });
         let args = request.args();
@@ -117,6 +122,7 @@ fn launch_without_role_keeps_todays_args() {
 
 fn spec(dir: &std::path::Path) -> RunSpec {
     RunSpec {
+        provider: Provider::Claude,
         cwd: dir.to_owned(),
         prompt: "message with spaces and $(literal)".into(),
         session_id: "a6cddf07-a8fd-46e1-9585-2571af65af24".into(),
@@ -522,11 +528,11 @@ async fn login_path_is_cached_and_used_for_claude_and_helper_resolution() {
         executable: dir.path().join("bare/agmend"),
         ..ClaudeRunner::default()
     };
-    let first = runner.environment().await.unwrap();
-    assert_eq!(first.claude, claude);
+    let first = runner.environment(Provider::Claude).await.unwrap();
+    assert_eq!(first.program, claude);
     assert_eq!(resolve_helper(&runner.executable, &first.path), Some(agmen));
     assert_eq!(first.path, bin.as_os_str());
-    runner.environment().await.unwrap();
+    runner.environment(Provider::Claude).await.unwrap();
     assert_eq!(shell.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -614,7 +620,7 @@ async fn invalid_login_path_fails_without_spawning_claude_and_is_retried() {
             ..ClaudeRunner::default()
         };
         for _ in 0..2 {
-            let error = runner.environment().await.unwrap_err();
+            let error = runner.environment(Provider::Claude).await.unwrap_err();
             assert!(matches!(error, RunError::LoginPath(_)));
             assert_eq!(error.reported_cost(), Some("0"));
         }
@@ -630,7 +636,7 @@ async fn invalid_login_path_fails_without_spawning_claude_and_is_retried() {
         ..ClaudeRunner::default()
     };
     assert!(matches!(
-        runner.environment().await.unwrap_err(),
+        runner.environment(Provider::Claude).await.unwrap_err(),
         RunError::NotInstalled
     ));
 }
@@ -657,10 +663,13 @@ async fn login_shell_timeout_is_bounded() {
         shell: Arc::new(HangingShell),
         ..ClaudeRunner::default()
     };
-    let error = tokio::time::timeout(Duration::from_secs(12), runner.environment())
-        .await
-        .unwrap()
-        .unwrap_err();
+    let error = tokio::time::timeout(
+        Duration::from_secs(12),
+        runner.environment(Provider::Claude),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert_eq!(
         error.to_string(),
         "could not resolve login PATH: login shell exceeded 10 seconds"
@@ -699,9 +708,9 @@ async fn login_probe_uses_path_after_last_marker_ignoring_startup_and_logout_tex
         }),
         ..ClaudeRunner::default()
     };
-    let environment = runner.environment().await.unwrap();
+    let environment = runner.environment(Provider::Claude).await.unwrap();
     assert_eq!(environment.path, dir.path().as_os_str());
-    assert_eq!(environment.claude, program);
+    assert_eq!(environment.program, program);
 }
 
 #[tokio::test]

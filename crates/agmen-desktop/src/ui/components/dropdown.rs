@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ChangeHandler, Color, Icon, IconSize, Label, Menu, MenuRow};
@@ -23,6 +23,7 @@ pub(crate) struct Dropdown {
     selected: usize,
     open: bool,
     code: bool,
+    width: Pixels,
     on_toggle: Option<ChangeHandler<bool>>,
     on_change: Option<ChangeHandler<usize>>,
 }
@@ -53,6 +54,7 @@ impl Dropdown {
             selected,
             open: false,
             code: false,
+            width: DROPDOWN_WIDTH,
             on_toggle: None,
             on_change: None,
         }
@@ -62,6 +64,14 @@ impl Dropdown {
     #[must_use]
     pub(crate) const fn open(mut self, open: bool) -> Self {
         self.open = open;
+        self
+    }
+
+    /// The box's and the menu's width, where Settings' fixed one does not fit,
+    /// as in a dialog's column of fields.
+    #[must_use]
+    pub(crate) const fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
         self
     }
 
@@ -144,7 +154,7 @@ impl RenderOnce for Dropdown {
             .items_center()
             .justify_between()
             .gap(SPACE_8)
-            .w(DROPDOWN_WIDTH)
+            .w(self.width)
             .py(SPACE_5)
             .px(SPACE_10)
             .rounded(RADIUS_MD)
@@ -187,7 +197,7 @@ impl RenderOnce for Dropdown {
             });
             let close = on_toggle.clone();
             Menu::new(format!("{}:menu", self.id))
-                .width(DROPDOWN_WIDTH)
+                .width(self.width)
                 .children(rows)
                 .on_close(move |window, cx| {
                     if let Some(handler) = &close {

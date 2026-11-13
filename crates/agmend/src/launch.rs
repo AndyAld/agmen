@@ -24,14 +24,63 @@ use crate::budget::Money;
 const OUTPUT_CAP: u64 = 4 * 1024 * 1024;
 const LOGIN_PATH_MARKER: &str = "__AGMEN_LOGIN_PATH_8F3C21__";
 
+/// The coding agent a managed agent runs on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Provider {
+    #[default]
+    Claude,
+    OpenCode,
+}
+
+impl Provider {
+    /// The product name, as messages to the person give it.
+    pub(crate) const fn title(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::OpenCode => "OpenCode",
+        }
+    }
+
+    /// The HELLO `agent` value.
+    pub(crate) const fn agent(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-code",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    const fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+/// Whether `model` is a plain model name: 1 to 128 letters, digits or
+/// `. - _ : [ ] / @`, not starting with a hyphen.
+pub(crate) fn model_name(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 128
+        && !model.starts_with('-')
+        && model
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".-_:[]/@".contains(&c))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RoleRun {
+    /// Claude Code's `--tools` value.
     pub(crate) tools: String,
+    /// The same tool classes as OpenCode permission actions.
+    pub(crate) actions: Vec<&'static str>,
     pub(crate) prompt_file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunSpec {
+    pub(crate) provider: Provider,
     pub(crate) cwd: PathBuf,
     pub(crate) prompt: String,
     pub(crate) session_id: String,
@@ -162,6 +211,14 @@ pub(crate) enum RunError {
 }
 
 impl RunError {
+    /// The message for an agent on `provider`.
+    // shortcut: the variants word themselves for Claude Code and this swaps the
+    // name; give each variant the provider if a third one arrives.
+    pub(crate) fn text(&self, provider: Provider) -> String {
+        self.to_string()
+            .replace(Provider::Claude.title(), provider.title())
+    }
+
     pub(crate) fn reported_cost(&self) -> Option<&str> {
         match self {
             Self::Failed { total_cost_usd } => Some(total_cost_usd),
@@ -213,11 +270,18 @@ pub(crate) trait Runner: std::fmt::Debug + Send + Sync {
     fn peer_groups(&self) -> BTreeSet<i32> {
         BTreeSet::new()
     }
+    /// The coding agents found on this machine that `run` can launch, as
+    /// `agent_providers` answers them.
+    fn providers(&self) -> Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send + '_>> {
+        Box::pin(async { Vec::new() })
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeRunner {
     program: PathBuf,
+    /// The `opencode` program, for agents launched on OpenCode.
+    opencode: PathBuf,
     timeout: Duration,
     shell: Arc<dyn ShellRunner>,
     environment: Arc<tokio::sync::OnceCell<OsString>>,
@@ -235,7 +299,8 @@ pub(crate) struct ClaudeRunner {
 impl Default for ClaudeRunner {
     fn default() -> Self {
         Self {
-            program: "claude".into(),
+            program: Provider::Claude.program().into(),
+            opencode: Provider::OpenCode.program().into(),
             timeout: Duration::from_secs(30 * 60),
             shell: Arc::new(LoginShell),
             environment: Arc::new(tokio::sync::OnceCell::new()),
@@ -353,11 +418,12 @@ impl ShellRunner for LoginShell {
 #[derive(Debug)]
 struct LaunchEnvironment {
     path: OsString,
-    claude: PathBuf,
+    /// The provider's program, resolved on the login PATH.
+    program: PathBuf,
 }
 
 impl ClaudeRunner {
-    async fn environment(&self) -> Result<LaunchEnvironment, RunError> {
+    async fn environment(&self, provider: Provider) -> Result<LaunchEnvironment, RunError> {
         let path = self
             .environment
             // Only a found PATH is kept: a slow or broken first run must not
@@ -381,10 +447,14 @@ impl ClaudeRunner {
             })
             .await
             .map_err(RunError::LoginPath)?;
-        let claude = resolve_program(&self.program, path).ok_or(RunError::NotInstalled)?;
+        let program = match provider {
+            Provider::Claude => &self.program,
+            Provider::OpenCode => &self.opencode,
+        };
+        let program = resolve_program(program, path).ok_or(RunError::NotInstalled)?;
         Ok(LaunchEnvironment {
             path: path.clone(),
-            claude,
+            program,
         })
     }
 }
@@ -466,7 +536,7 @@ fn attach_script(environment: &LaunchEnvironment, spec: &AttachSpec) -> Result<S
         "#!/bin/sh\n# Written by agmend: Claude Code on this agent's owner session.\ncd {cwd} || exit 1\nprintf '%s\\n' \"$$\" > {pid}\nPATH={path}\nAGMEN_MANAGED=1\nexport PATH AGMEN_MANAGED\nexec {claude} {flag} {id} --disallowedTools {inbox}\n",
         cwd = text(&spec.cwd)?,
         pid = text(&spec.pid_file)?,
-        claude = text(&environment.claude)?,
+        claude = text(&environment.program)?,
         id = shell_word(&spec.session_id),
         inbox = shell_word(ATTACHED_DISALLOWED),
     ))
@@ -479,7 +549,7 @@ impl Runner for ClaudeRunner {
             if !crate::transcripts::is_session_id(&spec.session_id) {
                 return Err(RunError::Terminal("the session id is not a UUID".into()));
             }
-            let environment = self.environment().await?;
+            let environment = self.environment(Provider::Claude).await?;
             let script = attach_script(&environment, &spec)?;
             let (path, pid_file) = (spec.script.clone(), spec.pid_file.clone());
             tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -533,13 +603,36 @@ impl Runner for ClaudeRunner {
             if let Some(agmen) = &self.test_agmen {
                 return Ok(agmen.clone());
             }
-            let environment = self.environment().await?;
+            let environment = self.environment(Provider::Claude).await?;
             resolve_helper(&self.executable, &environment.path).ok_or(RunError::AgmenNotInstalled)
         })
     }
 
     fn contains_peer(&self, pid: i32) -> bool {
         crate::peer::contains_pid(&self.peer_groups(), pid).unwrap_or(true)
+    }
+
+    fn providers(&self) -> Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send + '_>> {
+        Box::pin(async move {
+            let mut found = Vec::new();
+            for provider in [Provider::Claude, Provider::OpenCode] {
+                // Not on the login PATH: not offered.
+                let Ok(environment) = self.environment(provider).await else {
+                    continue;
+                };
+                let models = match provider {
+                    // Claude Code prints no model list; the desktop offers its usual names.
+                    Provider::Claude => Vec::new(),
+                    Provider::OpenCode => {
+                        opencode::models(&environment.program, &environment.path).await
+                    }
+                };
+                found.push(serde_json::json!({
+                    "name": provider, "title": provider.title(), "models": models,
+                }));
+            }
+            found
+        })
     }
 
     fn peer_groups(&self) -> BTreeSet<i32> {
@@ -549,11 +642,18 @@ impl Runner for ClaudeRunner {
     fn run(&self, spec: RunSpec, mut stop: oneshot::Receiver<()>) -> RunFuture {
         let runner = self.clone();
         Box::pin(async move {
-            let environment = runner.environment().await?;
+            let environment = runner.environment(spec.provider).await?;
             // No shell interpolation: the batch and prompt each remain one argument.
-            let mut command = tokio::process::Command::new(&environment.claude);
+            let mut command = tokio::process::Command::new(&environment.program);
+            match spec.provider {
+                Provider::Claude => {
+                    command.args(spec.args());
+                }
+                Provider::OpenCode => opencode::prepare(&mut command, &spec)
+                    .await
+                    .map_err(RunError::Spawn)?,
+            }
             command
-                .args(spec.args())
                 .current_dir(&spec.cwd)
                 .env("AGMEN_MANAGED", "1")
                 .env("AGMEN_IDENTITY", spec.identity.as_str())
@@ -592,6 +692,10 @@ impl Runner for ClaudeRunner {
                 .take()
                 .ok_or_else(|| std::io::Error::other("managed agent stderr missing"))?;
             let work = async {
+                if spec.provider == Provider::OpenCode {
+                    return opencode::result(stdout, stderr, &mut child, opencode::cap(&spec))
+                        .await;
+                }
                 let read_output = async {
                     let mut bytes = Vec::new();
                     stdout.take(OUTPUT_CAP + 1).read_to_end(&mut bytes).await?;
@@ -672,6 +776,9 @@ pub(crate) fn new_session_id() -> Result<String, std::io::Error> {
         &hex[20..]
     ))
 }
+
+#[path = "launch_opencode.rs"]
+mod opencode;
 
 #[cfg(test)]
 #[path = "launch_tests.rs"]

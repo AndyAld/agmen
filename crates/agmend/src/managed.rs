@@ -23,11 +23,13 @@ use crate::console::{bad_request, params};
 use crate::hub::{Hub, HubError};
 use crate::hub_mint::{identity_on_record, rollback_hub_mint, rollback_untrusted_hub_mint};
 use crate::identities::{Identities, LocalToken};
-use crate::launch::{RoleRun, RunError, RunSpec, Runner};
+use crate::launch::{Provider, RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
 use roles::{PersonalSnapshot, ReviewedBase, RoleCacheKey};
 
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
+/// Palette slots a launch may name; a theme with fewer falls back in the desktop.
+const MAX_COLOR_SLOTS: u8 = 16;
 pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
 /// How long quit lets an admitted launch finish before abandoning it.
 pub(crate) const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
@@ -44,7 +46,17 @@ pub(crate) struct Launch {
     root: Option<PathBuf>,
     model: Option<String>,
     budget_usd: Option<serde_json::Number>,
+    /// No spending cap. Only the person's own launch can ask: a child launch
+    /// has no such field, and gets it only by inheriting it from its parent.
+    #[serde(default)]
+    no_budget: bool,
     role: Option<String>,
+    /// The theme palette slot the desktop draws this agent in. Kept on this
+    /// machine only.
+    color: Option<u8>,
+    /// The coding agent to run it on; Claude Code when absent.
+    #[serde(default)]
+    provider: Provider,
 }
 
 /// The branch and folder a launch created for its worker.
@@ -100,6 +112,12 @@ struct Record {
     depth: u32,
     #[serde(default)]
     shared_budget: bool,
+    /// The desktop's palette slot for this agent, when the person picked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<u8>,
+    /// The coding agent it runs on.
+    #[serde(default)]
+    provider: Provider,
 }
 
 fn root_depth() -> u32 {
@@ -227,6 +245,11 @@ impl Managed {
     pub(crate) fn peer_groups(&self) -> std::collections::BTreeSet<i32> {
         self.runner.peer_groups()
     }
+
+    /// `agent_providers {}`: the coding agents `agent_launch` can run here.
+    pub(crate) async fn providers(&self) -> Result<Value, ApiError> {
+        Ok(json!({"providers": self.runner.providers().await}))
+    }
     pub(crate) fn new(
         origins: Arc<crate::origin::Origins>,
         runner: Arc<dyn Runner>,
@@ -301,14 +324,11 @@ impl Managed {
         }
         // The model is one argv value after --model: keep it a plain model name
         // that cannot read as another flag.
-        if launch.model.as_ref().is_some_and(|model| {
-            model.is_empty()
-                || model.len() > 128
-                || model.starts_with('-')
-                || !model
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b".-_:[]/@".contains(&c))
-        }) {
+        if launch
+            .model
+            .as_ref()
+            .is_some_and(|model| !crate::launch::model_name(model))
+        {
             return Err(bad_request(
                 "model must be 1 to 128 letters, digits or . - _ : [ ] / @ and not start with a hyphen",
             ));
@@ -320,11 +340,37 @@ impl Managed {
                 .map_or_else(|| "5".into(), ToString::to_string),
         )
         .map_err(error)?;
+        // OpenCode names a model as provider/model; any other name fails every batch.
+        if launch.provider == Provider::OpenCode
+            && launch
+                .model
+                .as_ref()
+                .is_some_and(|model| !model.contains('/'))
+        {
+            return Err(bad_request(
+                "an OpenCode model is named provider/model, such as anthropic/claude-haiku-5-5",
+            ));
+        }
+        if launch.no_budget && launch.budget_usd.is_some() {
+            return Err(bad_request("give budget_usd or no_budget, not both"));
+        }
+        if launch.color.is_some_and(|slot| slot >= MAX_COLOR_SLOTS) {
+            return Err(bad_request("color must be a palette slot from 0 to 15"));
+        }
         Ok(launch)
     }
 
     pub(crate) async fn launch(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let launch = Self::validate_launch(raw)?;
+        // An out-of-range amount saturates to the cap that means no budget. A
+        // child's ask is clamped or refused against its parent instead.
+        if let Some(asked) = &launch.budget_usd
+            && Money::from_usd(&asked.to_string()).map_err(error)? == Money::MAX
+        {
+            return Err(bad_request(
+                "budget_usd is out of range; give no_budget for no cap",
+            ));
+        }
         let root = match launch.root.clone() {
             Some(root) => root,
             None => self
@@ -413,7 +459,9 @@ impl Managed {
             .budget_usd
             .as_ref()
             .map_or_else(|| "5".into(), ToString::to_string);
-        let budget_usd = if parent.is_some() {
+        let budget_usd = if launch.no_budget {
+            Money::MAX.usd()
+        } else if parent.is_some() {
             Money::from_usd(&budget_usd).map_err(error)?.usd()
         } else {
             budget_usd
@@ -425,7 +473,11 @@ impl Managed {
             branch: branch.clone(),
             owner_session_id: crate::launch::new_session_id().map_err(error)?,
             others_session_id: crate::launch::new_session_id().map_err(error)?,
-            model: launch.model.or_else(|| Some("sonnet".into())),
+            // OpenCode model names carry a provider, so it gets no default:
+            // without one it runs on the person's own default model.
+            model: launch
+                .model
+                .or_else(|| (launch.provider == Provider::Claude).then(|| "sonnet".into())),
             budget_usd,
             source: Source::Launched,
             role: identity.role.clone(),
@@ -440,6 +492,8 @@ impl Managed {
                 .map(|parent| parent.identity.identity_id.clone()),
             depth,
             shared_budget,
+            color: launch.color,
+            provider: launch.provider,
         };
         let record_layer = record.role_layer.clone();
         let local_token = identities.local_token(&identity.identity_id).await?;
@@ -458,7 +512,7 @@ impl Managed {
         }
         worker.state = "idle";
         // HELLO goes through the same durable identity outbox as agent chat.
-        let hello = actions::hello(model, branch.clone())?;
+        let hello = actions::hello(launch.provider, model, branch.clone())?;
         if let Err(error) = identities.post(&metadata, hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
@@ -742,7 +796,17 @@ impl Managed {
             .filter(|tool| !(no_edits && matches!(*tool, "Edit" | "Write" | "NotebookEdit")))
             .collect::<Vec<_>>()
             .join(",");
-        Ok(RoleRun { tools, prompt_file })
+        // OpenCode has no lane guard, so there a scope other than none is
+        // stated in the role prompt and not enforced (Andy, 2026-11-13).
+        let actions = agmen_roles::opencode_actions(role)
+            .into_iter()
+            .filter(|action| !(no_edits && *action == "edit"))
+            .collect();
+        Ok(RoleRun {
+            tools,
+            actions,
+            prompt_file,
+        })
     }
 
     fn run_spec(
@@ -755,12 +819,11 @@ impl Managed {
         settings: &Safeguards,
     ) -> RunSpec {
         let batch_cap = held.batch_cap(owner_only, can_launch, settings);
-        held.in_flight_cap = if settings.budgets {
-            batch_cap
-        } else {
-            Money::ZERO
-        };
+        // An agent with no budget runs uncapped and protects nothing from its children.
+        let cap_budget = settings.budgets && !held.budget.unlimited();
+        held.in_flight_cap = if cap_budget { batch_cap } else { Money::ZERO };
         RunSpec {
+            provider: held.record.provider,
             cwd: held.record.worktree.clone(),
             prompt,
             session_id,
@@ -768,7 +831,7 @@ impl Managed {
             model: held.record.model.clone(),
             budget_remaining: held.budget.remaining_usd(),
             budget_cap: Some(batch_cap),
-            cap_budget: settings.budgets,
+            cap_budget,
             identity: held.record.identity.identity_id.clone(),
             local_token: None,
             mcp_config: self
@@ -843,6 +906,13 @@ impl Managed {
             entry["parent"] = json!(record.parent);
             entry["depth"] = json!(record.depth);
             entry["stopped_at"] = json!(worker.stopped_at);
+            if worker.budget.unlimited() {
+                entry["no_budget"] = json!(true);
+            }
+            if let Some(color) = record.color {
+                entry["color"] = json!(color);
+            }
+            entry["provider"] = json!(record.provider);
             // One roster read per local project, not per agent: the desktop polls this.
             let resumable = if agmen_client::is_local(&record.identity.hub_url) {
                 let members = match local_members.entry(record.identity.project.clone()) {
@@ -936,10 +1006,16 @@ impl Managed {
         {
             return Err(crate::identities::forbidden());
         }
+        if held.budget.unlimited() {
+            return Err(bad_request("this agent has no budget to raise"));
+        }
         let cap = Money::from_usd(&held.record.budget_usd)
             .map_err(error)?
             .checked_add(add)
             .map_err(error)?;
+        if cap == Money::MAX {
+            return Err(invalid());
+        }
         let mut record = held.record.clone();
         record.budget_usd = cap.usd();
         drop(held);
@@ -1339,10 +1415,14 @@ async fn run_worker(
             }
         }
         Err(error) => {
-            let cost = error
-                .reported_cost()
-                .map(str::to_owned)
-                .unwrap_or_else(|| held.budget.remaining_usd());
+            // With no budget there is no remaining cap to charge, and charging
+            // it would stop the agent for good.
+            let unknown = error.reported_cost().is_none() && !held.budget.unlimited();
+            let cost = match error.reported_cost() {
+                Some(cost) => cost.to_owned(),
+                None if unknown => held.budget.remaining_usd(),
+                None => "0".into(),
+            };
             // shortcut: charge unknown interrupted usage against the remaining cap
             // until failed batches can supply durable usage receipts.
             let record = match managed.record_cost(held, &cost).await {
@@ -1353,14 +1433,18 @@ async fn run_worker(
                 }
             };
             drop(accounting);
-            let explanation = if error.reported_cost().is_none() {
+            let explanation = if unknown {
                 " Remaining budget is reserved because usage was not reported."
             } else {
                 ""
             };
             if let Ok(message) = envelope(
                 Payload::Fyi {},
-                &format!("Claude Code batch stopped: {error}.{explanation}"),
+                &format!(
+                    "{} batch stopped: {}.{explanation}",
+                    record.provider.title(),
+                    error.text(record.provider)
+                ),
             ) && let Err(error) = identities.post(&record.identity, message).await
             {
                 tracing::warn!(code=?error.code,"batch failure report failed");

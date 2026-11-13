@@ -29,7 +29,7 @@ use super::{
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
-use crate::launch::AttachSpec;
+use crate::launch::{AttachSpec, Provider};
 use crate::state::ManagedIdentity;
 use crate::transcripts;
 
@@ -136,6 +136,10 @@ struct Stored {
     depth: u32,
     #[serde(default)]
     shared_budget: bool,
+    #[serde(default)]
+    color: Option<u8>,
+    #[serde(default)]
+    provider: Provider,
 }
 
 impl Stored {
@@ -181,6 +185,8 @@ impl Stored {
                 parent: self.parent,
                 depth: self.depth,
                 shared_budget: self.shared_budget,
+                color: self.color,
+                provider: self.provider,
             },
             migrated,
         ))
@@ -335,6 +341,7 @@ impl Managed {
             Some(worker) => {
                 let held = worker.lock().await;
                 owned(&held.record.identity, &login)?;
+                attachable(&held.record)?;
                 match held.state {
                     "attached" => {
                         return Err(bad_request(format!(
@@ -674,6 +681,9 @@ impl Managed {
             parent: None,
             depth: root_depth(),
             shared_budget: false,
+            color: None,
+            // A folder joined by hand holds a Claude Code session.
+            provider: Provider::Claude,
         };
         self.save_record(&record).await?;
         let cap = Money::from_usd(JOINED_BUDGET_USD).map_err(|_| error("invalid budget"))?;
@@ -723,7 +733,7 @@ impl Managed {
         let record = held.record.clone();
         drop(held);
         self.clear_stopped(&record.identity.identity_id).await;
-        let hello = hello(record.model.clone(), record.branch.clone())?;
+        let hello = hello(record.provider, record.model.clone(), record.branch.clone())?;
         if let Err(error) = identities.post(&record.identity, hello).await {
             tracing::warn!(code = ?error.code, "managed agent HELLO is pending connection");
         }
@@ -1140,11 +1150,29 @@ fn prune_answer(removed: Vec<String>, kept: Vec<Value>, unlisted: usize) -> Valu
 }
 
 /// The HELLO a managed agent says when it comes online.
-pub(super) fn hello(model: Option<String>, branch: String) -> Result<ClientEnvelope, ApiError> {
+/// Refuses to attach an agent that does not run on Claude Code.
+// shortcut: the attach script and the owner-session check read Claude Code's
+// files; add OpenCode's when it is wanted.
+fn attachable(record: &Record) -> Result<(), ApiError> {
+    if record.provider == Provider::Claude {
+        return Ok(());
+    }
+    Err(bad_request(format!(
+        "{} runs on {}; only Claude Code agents can be attached",
+        record.identity.handle,
+        record.provider.title()
+    )))
+}
+
+pub(super) fn hello(
+    provider: Provider,
+    model: Option<String>,
+    branch: String,
+) -> Result<ClientEnvelope, ApiError> {
     envelope(
         Payload::Hello {
             client: format!("agmend/{}", env!("CARGO_PKG_VERSION")),
-            agent: Some("claude-code".into()),
+            agent: Some(provider.agent().into()),
             model,
             looking_at: Some(branch),
         },

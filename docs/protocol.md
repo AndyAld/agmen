@@ -441,12 +441,40 @@ receive `forbidden`, and so do worker peers (above). Each checks that the
 agent's owner and origin match the local person for a local project, or the
 signed-in hub login for a hub project.
 
-- `agent_launch {project, name, root?, model?, budget_usd?}` makes a worktree
+- `agent_launch {project, name, root?, model?, role?, budget_usd?, no_budget?,
+  color?, provider?}` makes a worktree
   on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
-  `managed/<identity>/agent.json`. The agent starts `idle`.
+  `managed/<identity>/agent.json`. The agent starts `idle`. Without
+  `budget_usd` the cap is 5 USD. `no_budget: true` launches with no cap
+  instead (giving both is refused): its batches run without
+  `--max-budget-usd`, `agent_budget` refuses it, and a batch that ends
+  without reporting its cost charges nothing. Only this call can ask;
+  `child_launch` has no such field. A child of a no-budget agent inherits
+  no budget unless it names a `budget_usd` of its own, and reserves nothing
+  from its parent. A `budget_usd` too large to store is refused here rather
+  than read as no cap. `color` is a palette slot from 0 to 15
+  that the desktop draws the agent in; it stays on this machine. `provider`
+  is `claude` (the default) or `opencode`, the coding agent every batch of
+  this agent runs on; a child launched by the agent runs on the same one.
+  Without `model`, Claude Code runs `sonnet` and OpenCode its own default.
+  An OpenCode batch runs `opencode run --standalone --format json` with a
+  per-batch config (the agmen MCP server, permission rules for the role and
+  for batches from others, and the instruction files). The batch runs as
+  its own OpenCode agent `agmen`, so rules the person gave other agents do
+  not apply, and the worktree's own `opencode.json` and `.opencode` are
+  ignored. agmend sums each step's reported cost and stops the batch at its
+  cap; a model that reports no cost is never stopped by it. A role's lane or
+  path edit limit is not enforced on OpenCode (only an edit scope of none
+  is, by withholding the edit tool), and `agent_attach` refuses an OpenCode
+  agent.
+- `agent_providers {}` answers `{"providers":[{name, title, models}]}`: the
+  coding agents found on the login PATH that `agent_launch` can run.
+  `models` is what `opencode models` lists, and empty for Claude Code.
 - `agent_list {project?}` answers `{"agents":[{identity, project, handle,
   state, model, budget_usd, spent_usd, worktree, branch, source, stopped_at,
-  resumable}]}`. `state`
+  resumable, no_budget?, color?, provider}]}`. `no_budget` is `true` for an agent
+  launched with no cap, whose `budget_usd` is then the largest amount
+  (`18446744073709.551615`); `color` is present when one was picked. `state`
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
   `joined`. `stopped_at` is an RFC 3339 timestamp, or `null` while running
   or when unknown. Each transition to stopped writes

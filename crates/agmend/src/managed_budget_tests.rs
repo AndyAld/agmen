@@ -1506,3 +1506,172 @@ async fn an_agent_outside_agmends_process_tree_still_cannot_raise_budgets() {
     .unwrap();
     assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
 }
+
+async fn no_budget_root(fixture: &Fixture) {
+    worker_call(fixture, "agent_launch", json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"chain","no_budget":true,"color":4})).await.unwrap();
+    tier(fixture, "agent001", Some(Tier::Owner)).await;
+}
+
+#[test]
+fn launch_takes_a_budget_or_no_budget_and_a_palette_color() {
+    let launch = Managed::validate_launch(
+        json!({"project":"project1","name":"ok","no_budget":true,"color":15}),
+    )
+    .unwrap();
+    assert!(launch.no_budget);
+    for raw in [
+        json!({"project":"project1","name":"ok","no_budget":true,"budget_usd":5}),
+        json!({"project":"project1","name":"ok","color":16}),
+    ] {
+        assert!(Managed::validate_launch(raw).is_err());
+    }
+}
+
+#[tokio::test]
+async fn no_budget_agent_runs_uncapped_and_stays_so_after_a_restart() {
+    let (fixture, _) = tree_fixture().await;
+    no_budget_root(&fixture).await;
+    let row = listed(&fixture, "agent001").await;
+    assert_eq!(row["no_budget"], true);
+    assert_eq!(row["color"], 4);
+    enqueue(&fixture, 1, "agent001").await;
+    let managed = &fixture.daemon.core.managed;
+    managed.tick().await;
+    for _ in 0..200 {
+        if listed(&fixture, "agent001").await["spent_usd"] == "1.000000" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert_eq!(listed(&fixture, "agent001").await["spent_usd"], "1.000000");
+    assert!(!fixture.runner.runs.lock().unwrap()[0].cap_budget);
+    let refused = worker_call(
+        &fixture,
+        "agent_budget",
+        json!({"identity":"agent001","add_usd":1}),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.message.contains("no budget"), "{}", refused.message);
+    managed.shutdown().await;
+    let restored = restarted(&fixture).await;
+    let row = restored.list(json!({})).await.unwrap()["agents"][0].clone();
+    assert_eq!(row["no_budget"], true);
+    assert_eq!(row["color"], 4);
+    assert!(
+        !worker_of(&restored, "agent001")
+            .await
+            .lock()
+            .await
+            .budget
+            .exhausted()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_batch_of_a_no_budget_agent_charges_nothing() {
+    let (fixture, _) = tree_fixture().await;
+    fixture.runner.mode.store(2, Ordering::SeqCst);
+    no_budget_root(&fixture).await;
+    enqueue(&fixture, 1, "agent001").await;
+    let managed = &fixture.daemon.core.managed;
+    managed.tick().await;
+    for _ in 0..200 {
+        if fixture.runner.runs.lock().unwrap().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    managed.stop(json!({"identity":"agent001"})).await.unwrap();
+    let worker = worker_of(managed, "agent001").await;
+    let held = worker.lock().await;
+    assert_eq!(held.budget.spent(), Money::ZERO);
+    assert!(!held.budget.exhausted());
+    drop(held);
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn child_launch_cannot_ask_for_no_budget() {
+    let (fixture, _) = tree_fixture().await;
+    no_budget_root(&fixture).await;
+    let refused = child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"kid","role":"chain","no_budget":true}),
+    )
+    .await;
+    assert!(refused.is_err());
+    // A child of a no-budget parent still gets a finite cap of its own.
+    budget_child(&fixture, "kid", 1.0).await.unwrap();
+    let child = listed(&fixture, "kid00001").await;
+    assert_eq!(child["budget_usd"], "1.000000");
+    assert!(child.get("no_budget").is_none());
+    fixture.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn child_of_a_no_budget_parent_has_no_budget_unless_it_asks_for_one() {
+    let (fixture, _) = tree_fixture().await;
+    no_budget_root(&fixture).await;
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"free","role":"chain"}),
+    )
+    .await
+    .unwrap();
+    let child = listed(&fixture, "kid00001").await;
+    assert_eq!(child["no_budget"], true);
+    // Nothing is reserved: there is no finite cap to share.
+    assert_eq!(reserved(&fixture, "agent001").await, "0.000000");
+    let managed = &fixture.daemon.core.managed;
+    assert!(
+        !worker_of(managed, "kid00001")
+            .await
+            .lock()
+            .await
+            .record
+            .shared_budget
+    );
+    enqueue(&fixture, 1, "kid00001").await;
+    batch(managed, "kid00001").await;
+    assert!(!fixture.runner.runs.lock().unwrap()[0].cap_budget);
+    // A child that names a cap keeps it.
+    budget_child(&fixture, "capped", 3.0).await.unwrap();
+    let capped = listed(&fixture, "kid00002").await;
+    assert_eq!(capped["budget_usd"], "3.000000");
+    assert!(capped.get("no_budget").is_none());
+    assert_eq!(reserved(&fixture, "agent001").await, "0.000000");
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_no_budget_reaches_the_no_cap_amount() {
+    let (fixture, _) = tree_fixture().await;
+    for amount in [json!(1e20), json!(18_446_744_073_710_u64)] {
+        let refused = worker_call(&fixture, "agent_launch", json!({"project":"project1","name":"big","root":fixture.dir.path().join("repo"),"role":"chain","budget_usd":amount})).await.unwrap_err();
+        assert!(
+            refused.message.contains("out of range"),
+            "{}",
+            refused.message
+        );
+    }
+    budget_root(&fixture, 18_446_744_073_709.0).await;
+    let refused = worker_call(
+        &fixture,
+        "agent_budget",
+        json!({"identity":"agent001","add_usd":0.551615}),
+    )
+    .await;
+    assert!(refused.is_err());
+    assert!(
+        listed(&fixture, "agent001")
+            .await
+            .get("no_budget")
+            .is_none()
+    );
+    fixture.daemon.core.managed.shutdown().await;
+}

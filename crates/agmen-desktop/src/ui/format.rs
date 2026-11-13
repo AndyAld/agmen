@@ -30,6 +30,10 @@ pub(crate) fn spend_today(usd: f64) -> String {
 /// `$11.20 of $20.00`.
 #[must_use]
 pub(crate) fn money_of(spent: f64, cap: f64) -> String {
+    // An agent launched with no budget has an infinite cap.
+    if cap.is_infinite() {
+        return format!("{} · no budget", money(spent));
+    }
     format!("{} of {}", money(spent), money(cap))
 }
 
@@ -177,6 +181,7 @@ mod tests {
         assert_eq!(money(0.42), "$0.42");
         assert_eq!(money(f64::NAN), "$0.00");
         assert_eq!(money_of(11.2, 20.0), "$11.20 of $20.00");
+        assert_eq!(money_of(1.25, f64::INFINITY), "$1.25 · no budget");
     }
 
     #[test]

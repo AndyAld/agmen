@@ -368,6 +368,7 @@ async fn identity_call(
         | "host_restart"
         | "agent_stop"
         | "agent_list"
+        | "agent_providers"
         | "agent_start"
         | "agent_attach"
         | "agent_detach"
@@ -480,6 +481,7 @@ async fn call(
         "agent_launch" => core.managed.launch(raw).await,
         "agent_stop" => core.managed.stop(raw).await,
         "agent_list" => core.managed.list(raw).await,
+        "agent_providers" => core.managed.providers().await,
         "agent_start" => core.managed.start(raw).await,
         "agent_attach" => core.managed.attach_claude(raw).await,
         "agent_detach" => core.managed.detach(raw).await,

@@ -275,7 +275,7 @@ impl AgentsPanel {
             agent.depth,
             agent.status,
             &agent.name,
-            &AgentRole::of(&agent.role),
+            &AgentRole::of(&agent.role).slot(agent.color),
             &agent.harness,
         )
         .selected(self.selected.as_ref() == Some(&id))
@@ -402,6 +402,9 @@ impl AgentsPanel {
 pub(crate) struct AgentRole {
     pub(crate) name: String,
     pub(crate) label: String,
+    /// The palette slot the person picked for the agent, in place of the
+    /// role's color.
+    pub(crate) slot: Option<u8>,
 }
 
 impl AgentRole {
@@ -410,7 +413,14 @@ impl AgentRole {
         Self {
             name: name.to_owned(),
             label: title_case(name),
+            slot: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) const fn slot(mut self, slot: Option<u8>) -> Self {
+        self.slot = slot;
+        self
     }
 }
 
@@ -427,11 +437,16 @@ pub(crate) fn agent_item(
 ) -> ListItem {
     ListItem::new(id.clone(), Indent::Depth(depth))
         .leading(StatusDot::new(status))
-        .child(Label::new(name.to_owned()).code().truncate())
+        .child(
+            Label::new(name.to_owned())
+                .code()
+                .color(role.slot.map_or(Color::Default, Color::Player))
+                .truncate(),
+        )
         .child(
             Label::new(role.label.clone())
                 .size(LabelSize::Small)
-                .color(Color::Role(role.name.clone().into()))
+                .color(Color::agent(role.slot, &role.name))
                 .truncate(),
         )
         .end(harness_label(id, harness))

@@ -39,6 +39,8 @@ pub(crate) struct ChatContext {
     /// Each roster agent's lowercase role, by handle, then each plan team
     /// member's.
     roles: BTreeMap<String, String>,
+    /// The palette slot the person picked for an agent, by handle.
+    colors: BTreeMap<String, u8>,
     /// Handles of the agents this person's agmend runs.
     local: BTreeSet<String>,
     /// Ids of the messages in the snapshot, so a reply can tell whether its
@@ -66,10 +68,14 @@ impl ChatContext {
     pub(crate) fn new(snapshot: Rc<Snapshot>) -> Self {
         let known = Known::from_snapshot(&snapshot);
         let mut roles = BTreeMap::new();
+        let mut colors = BTreeMap::new();
         let mut local = BTreeSet::new();
         for group in &snapshot.roster {
             for agent in &group.agents {
                 roles.insert(agent.handle.clone(), agent.role.clone());
+                if let Some(color) = agent.color {
+                    colors.insert(agent.handle.clone(), color);
+                }
                 if group.you {
                     local.insert(agent.handle.clone());
                 }
@@ -107,6 +113,7 @@ impl ChatContext {
             snapshot,
             known,
             roles,
+            colors,
             local,
             ids,
             positions,
@@ -178,6 +185,11 @@ impl ChatContext {
         self.roles.get(handle).map(String::as_str)
     }
 
+    /// The palette slot the person picked for the agent `handle`.
+    pub(crate) fn color(&self, handle: &str) -> Option<u8> {
+        self.colors.get(handle).copied()
+    }
+
     pub(crate) fn handle(&self, id: &IdentityId) -> Option<&str> {
         self.known.handle(id)
     }
@@ -206,7 +218,7 @@ impl ChatContext {
     pub(crate) fn chip_color(&self, target: &RefTarget) -> Color {
         match target {
             RefTarget::Agent(handle) => {
-                Color::Role(self.role(handle).unwrap_or("engineer").to_owned().into())
+                Color::agent(self.color(handle), self.role(handle).unwrap_or("engineer"))
             }
             RefTarget::Person(_) => Color::TextMuted,
             RefTarget::Role(role) => Color::Role(role.clone().into()),

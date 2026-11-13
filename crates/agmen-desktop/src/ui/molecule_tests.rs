@@ -18,7 +18,10 @@ fn field_puts_its_label_close_to_its_control(cx: &mut TestAppContext) {
     redraw(cx);
     for (label, control) in [
         ("new-agent:name-field:label", "new-agent:name"),
+        ("new-agent:provider-field:label", "new-agent:provider"),
         ("new-agent:model-field:label", "new-agent:model"),
+        ("new-agent:role-field:label", "new-agent:role"),
+        ("new-agent:color-field:label", "new-agent:color"),
         ("new-agent:budget-field:label", "new-agent:budget"),
     ] {
         let label = cx.debug_bounds(label).expect("the Field label");
@@ -35,11 +38,26 @@ fn new_agent_labels_sit_closer_to_their_own_field_than_to_the_one_above(cx: &mut
     for (above, label, control) in [
         (
             "new-agent:name",
+            "new-agent:provider-field:label",
+            "new-agent:provider",
+        ),
+        (
+            "new-agent:provider",
             "new-agent:model-field:label",
             "new-agent:model",
         ),
         (
             "new-agent:model",
+            "new-agent:role-field:label",
+            "new-agent:role",
+        ),
+        (
+            "new-agent:role",
+            "new-agent:color-field:label",
+            "new-agent:color",
+        ),
+        (
+            "new-agent:color-field:hint",
             "new-agent:budget-field:label",
             "new-agent:budget",
         ),

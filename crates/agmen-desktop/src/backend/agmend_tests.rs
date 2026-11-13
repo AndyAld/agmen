@@ -523,6 +523,124 @@ fn agent_panel_shows_spend_against_cap() {
 }
 
 #[test]
+fn launch_sends_no_budget_role_and_color_when_chosen() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    backend
+        .act(Action::LaunchAgent {
+            name: "worker".into(),
+            provider: None,
+            model: Some("opus".into()),
+            budget_cents: None,
+            role: Some("engineer".into()),
+            color: Some(3),
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    assert_eq!(
+        fake.state.lock().unwrap().agent_requests[0].params,
+        json!({"project": PROJECT, "name": "worker", "model": "opus",
+               "no_budget": true, "role": "engineer", "color": 3})
+    );
+}
+
+#[test]
+fn no_budget_agent_has_no_cap_and_keeps_its_color() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idmanaged", "project": PROJECT,
+            "handle": "andy/worker", "state": "idle",
+            "budget_usd": "18446744073709.551615", "no_budget": true,
+            "spent_usd": "1.25", "color": 3
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let snapshot = backend.snapshot();
+    let agent = &snapshot.agents[&ident("idmanaged")];
+    assert!(agent.budget_usd.is_infinite());
+    let row = snapshot
+        .roster
+        .iter()
+        .flat_map(|group| &group.agents)
+        .find(|row| row.id == ident("idmanaged"))
+        .unwrap();
+    assert_eq!(row.color, Some(3));
+}
+
+#[test]
+fn opencode_launch_names_its_provider_and_no_model_unless_one_is_picked() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    backend
+        .act(Action::LaunchAgent {
+            name: "worker".into(),
+            provider: Some("opencode".into()),
+            model: None,
+            budget_cents: Some(500),
+            role: None,
+            color: None,
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let requests = fake.state.lock().unwrap();
+    let launch = requests
+        .agent_requests
+        .iter()
+        .find(|request| request.method == "agent_launch")
+        .unwrap();
+    assert_eq!(
+        launch.params,
+        json!({"project": PROJECT, "name": "worker", "provider": "opencode", "budget_usd": 5.0})
+    );
+}
+
+#[test]
+fn opencode_agent_is_labelled_and_its_role_limit_is_shown_as_not_enforced() {
+    // This console carries the built-in roles.
+    let start = crate::backend::fake_agmend::console_with_checkout(vec![]);
+    let fake = FakeAgmend::start(start);
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [
+            {"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker",
+             "state": "idle", "role": "engineer", "provider": "opencode"},
+            {"identity": "idreader", "project": PROJECT, "handle": "andy/reader",
+             "state": "idle", "role": "researcher", "provider": "opencode"},
+            {"identity": "idclaude", "project": PROJECT, "handle": "andy/claude",
+             "state": "idle", "role": "engineer", "provider": "claude"}
+        ]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idclaude")))
+    });
+    let snapshot = backend.snapshot();
+    let worker = &snapshot.agents[&ident("idmanaged")];
+    assert_eq!(worker.harness_label, "OpenCode");
+    assert!(
+        worker.edits.ends_with("not enforced on OpenCode"),
+        "{}",
+        worker.edits
+    );
+    // A role that edits nothing is enforced: OpenCode gets no edit tool.
+    assert!(snapshot.agents[&ident("idreader")].edits.is_empty());
+    let claude = &snapshot.agents[&ident("idclaude")];
+    assert_eq!(claude.harness_label, "Claude Code");
+    assert!(claude.edits.is_empty());
+}
+
+#[test]
 fn older_agent_list_without_spend_still_parses() {
     let fake = FakeAgmend::start(console(vec![]));
     fake.edit(|state| {
@@ -1593,8 +1711,11 @@ fn managed_agent_actions_use_local_launch_and_stop() {
     backend
         .act(Action::LaunchAgent {
             name: "worker".into(),
-            model: "sonnet".into(),
-            budget_cents: 500,
+            provider: None,
+            model: Some("sonnet".into()),
+            budget_cents: Some(500),
+            role: None,
+            color: None,
         })
         .unwrap();
     wait_for(&mut updates, |update| {

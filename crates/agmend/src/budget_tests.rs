@@ -311,3 +311,12 @@ fn reservations_never_wrap_or_go_negative() {
     assert_eq!(full.remaining_usd(), "0.000000");
     assert!(full.reserve(money("0.000001"), money("0")).is_err());
 }
+
+#[test]
+fn only_the_top_cap_is_unlimited_and_it_survives_its_own_text() {
+    assert!(!Budget::new(money("1000000")).unlimited());
+    assert!(Budget::new(Money::MAX).unlimited());
+    assert_eq!(Money::from_usd(&Money::MAX.usd()).unwrap(), Money::MAX);
+    // An out-of-range amount saturates to the same cap.
+    assert_eq!(money("1e30"), Money::MAX);
+}

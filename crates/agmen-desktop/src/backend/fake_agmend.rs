@@ -430,6 +430,10 @@ fn host_response(id: u64, method: &str, state: &Mutex<FakeState>) -> Response {
 fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
     let id = request.id;
     let mut state = state.lock().unwrap();
+    // A read, like agent_list: it is not one of the agent actions tests count.
+    if request.method == "agent_providers" {
+        return Response::ok(id, json!({"providers": []}));
+    }
     if request.method == "agent_list" {
         if let Some(answer) = &state.agent_list_answer {
             return Response::ok(id, answer.clone());

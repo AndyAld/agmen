@@ -158,6 +158,8 @@ impl Shared {
 struct Live {
     project: String,
     managed: Vec<ManagedAgent>,
+    /// What `agent_providers` answered, read until agmend first answers.
+    providers: Vec<super::LaunchProvider>,
     agent_error: Option<String>,
     agent_notice: Option<String>,
     agent_read_error: Option<String>,
@@ -275,13 +277,16 @@ impl Live {
                 ManagedState::Idle => AgentStatus::Idle,
                 ManagedState::Offline => AgentStatus::Offline,
             };
-            snapshot
-                .agents
-                .insert(agent.identity.clone(), agent_info(agent, status, &work));
+            let mut info = agent_info(agent, status, &work);
+            if let Some(edits) = agent.unenforced_edits(&snapshot.roles) {
+                info.edits = edits;
+            }
+            snapshot.agents.insert(agent.identity.clone(), info);
             snapshot.managed_work.insert(agent.identity.clone(), work);
             if let Some(group) = snapshot.roster.iter_mut().find(|group| group.you) {
                 if let Some(row) = group.agents.iter_mut().find(|row| row.id == agent.identity) {
                     row.status = status;
+                    row.color = agent.color;
                 } else {
                     group.agents.push(AgentRow {
                         id: agent.identity.clone(),
@@ -293,14 +298,16 @@ impl Live {
                             .unwrap_or(&agent.handle)
                             .to_owned(),
                         role: "engineer".into(),
-                        harness: "claude".into(),
+                        harness: agent.harness().into(),
                         status,
                         depth: 1,
                         item: None,
+                        color: agent.color,
                     });
                 }
             }
         }
+        snapshot.launch_providers.clone_from(&self.providers);
         snapshot.newer = self.held.newer;
         snapshot.waiting = self.held.waiting;
         snapshot
@@ -536,6 +543,13 @@ struct ManagedAgent {
     model: Option<String>,
     #[serde(default)]
     budget_usd: Option<String>,
+    #[serde(default)]
+    no_budget: bool,
+    #[serde(default)]
+    color: Option<u8>,
+    /// `claude` or `opencode`; an older agmend names none and runs Claude Code.
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     spent_usd: Option<String>,
     #[serde(default)]
@@ -815,6 +829,7 @@ impl AgmendBackend {
                 me: console.me,
                 roster: console.roster,
                 managed: Vec::new(),
+                providers: Vec::new(),
                 agent_error: None,
                 agent_notice: None,
                 agent_read_error: None,
@@ -924,10 +939,14 @@ impl Backend for AgmendBackend {
         match action {
             Action::LaunchAgent {
                 name,
+                provider,
                 model,
                 budget_cents,
+                role,
+                color,
             } => {
-                let mut params = json!({"project": self.shared.project, "name": name, "model": model, "budget_usd": f64::from(budget_cents) / 100.0});
+                let mut params = launch_params(&name, provider, model, budget_cents, role, color);
+                params["project"] = json!(self.shared.project);
                 if let Some(root) = &self.shared.root {
                     params["root"] = json!(root);
                 }
@@ -1241,12 +1260,16 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
     // Ends when the backend and the watch thread have both gone.
     let interval = Duration::from_secs(2);
     let mut next_poll = std::time::Instant::now() + interval;
+    let mut providers_read = false;
     loop {
         if shared.lock().closed {
             return;
         }
         if std::time::Instant::now() >= next_poll {
             refresh_agents(shared, &mut conn);
+            // After the first agent list, so a slow `opencode models` never
+            // delays it, and again each poll until agmend has answered.
+            providers_read = providers_read || refresh_providers(shared, &mut conn);
             // Beside the agent poll, not after an agent job: status overlays
             // spend and state and must not add a console_snapshot.
             refresh_listener(shared, &mut conn);
@@ -1423,6 +1446,61 @@ fn context_notice(answer: &Value) -> Option<String> {
     }
 }
 
+/// `agent_launch`'s parameters for what New Agent chose. A provider, a model,
+/// a role and a color are sent only when chosen. An agmend older than `no_budget` refuses a
+/// blank budget instead of capping it.
+fn launch_params(
+    name: &str,
+    provider: Option<String>,
+    model: Option<String>,
+    budget_cents: Option<u32>,
+    role: Option<String>,
+    color: Option<u8>,
+) -> Value {
+    let mut params =
+        json!({"name": name, "provider": provider, "model": model, "role": role, "color": color});
+    match budget_cents {
+        Some(cents) => params["budget_usd"] = json!(f64::from(cents) / 100.0),
+        None => params["no_budget"] = json!(true),
+    }
+    // An absent choice is not sent, so an older agmend still launches.
+    if let Some(params) = params.as_object_mut() {
+        params.retain(|_, value| !value.is_null());
+    }
+    params
+}
+
+impl ManagedAgent {
+    fn on_opencode(&self) -> bool {
+        self.provider.as_deref() == Some("opencode")
+    }
+
+    /// The harness name an agent row shows.
+    fn harness(&self) -> &'static str {
+        if self.on_opencode() {
+            "opencode"
+        } else {
+            "claude"
+        }
+    }
+
+    /// The role's edit limit with a note that nothing enforces it: only the
+    /// Claude Code plugin's lane guard holds an agent to its role's lanes or
+    /// paths, and on OpenCode the role prompt states them.
+    fn unenforced_edits(&self, roles: &[super::RoleFile]) -> Option<String> {
+        if !self.on_opencode() {
+            return None;
+        }
+        roles
+            .iter()
+            .filter(|file| Some(&file.name) == self.role.as_ref())
+            .find_map(|file| file.info.as_ref())
+            .map(|info| &info.edits)
+            .filter(|edits| **edits != crate::roles::Edits::None)
+            .map(|edits| format!("{edits} · not enforced on OpenCode"))
+    }
+}
+
 /// A USD string from agmend as dollars. A missing, unparsable, negative or
 /// non-finite value is 0.0, so an older or malformed reply stays readable
 /// (the desktop has no logging to report it to).
@@ -1440,14 +1518,23 @@ fn agent_info(agent: &ManagedAgent, status: AgentStatus, work: &ManagedWork) -> 
         handle: agent.handle.clone(),
         role: agent.role.clone().unwrap_or_default(),
         role_label: agent.role.clone().unwrap_or_default(),
-        harness_label: "Claude Code".into(),
+        harness_label: if agent.on_opencode() {
+            "OpenCode"
+        } else {
+            "Claude Code"
+        }
+        .into(),
         model: agent.model.clone().unwrap_or_default(),
         state: agent.state.label().into(),
         status,
         branch: work.branch.clone().unwrap_or_default(),
         worktree_state: work.worktree.clone().unwrap_or_default(),
         spent_usd: usd(agent.spent_usd.as_deref()),
-        budget_usd: usd(agent.budget_usd.as_deref()),
+        budget_usd: if agent.no_budget {
+            f64::INFINITY
+        } else {
+            usd(agent.budget_usd.as_deref())
+        },
         // These fields have no live source yet.
         delegated_by: None,
         tools: Vec::new(),
@@ -1463,6 +1550,31 @@ fn agent_info(agent: &ManagedAgent, status: AgentStatus, work: &ManagedWork) -> 
         tokens_out: 0,
         cache_read: 0,
     }
+}
+
+/// Reads the coding agents agmend can launch, and says whether agmend
+/// answered. An agmend too old to know the call refuses it: that counts as
+/// an answer, the list stays empty and New Agent offers Claude Code alone.
+// shortcut: read until the first answer; an agent installed later shows
+// after the app restarts. Poll it if that matters.
+fn refresh_providers(shared: &Shared, conn: &mut Option<Conn>) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Providers {
+        providers: Vec<super::LaunchProvider>,
+    }
+    let answer = match request(shared, conn, "agent_providers", json!({})) {
+        Ok(value) => parse::<Providers>(value),
+        // agmend is not reachable yet: ask again on the next poll.
+        Err(RequestError::Down(_)) => return false,
+        Err(RequestError::Refused(_)) => return true,
+    };
+    let Ok(answer) = answer else {
+        return true;
+    };
+    let mut live = shared.lock();
+    live.providers = answer.providers;
+    live.publish_snapshot();
+    true
 }
 
 fn refresh_agents(shared: &Shared, conn: &mut Option<Conn>) {
@@ -2055,6 +2167,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         models: Vec::new(),
         message_models: BTreeMap::new(),
         standing_model: None,
+        launch_providers: Vec::new(),
     }
 }
 
@@ -2128,6 +2241,7 @@ fn agent_row(entry: &RosterEntry, roster: &[RosterEntry]) -> AgentRow {
         },
         depth: depth(entry, roster),
         item: None,
+        color: None,
     }
 }
 

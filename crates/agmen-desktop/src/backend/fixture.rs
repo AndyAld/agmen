@@ -89,6 +89,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         models: model_groups(),
         message_models: BTreeMap::new(),
         standing_model: None,
+        launch_providers: Vec::new(),
     })
 }
 

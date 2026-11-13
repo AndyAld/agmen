@@ -110,6 +110,7 @@ fn my_agents_reads_the_you_group_with_listener() {
         status: AgentStatus::Offline,
         depth: 0,
         item: None,
+        color: None,
     };
     let mut snapshot = chat_snapshot();
     snapshot.roster = vec![

@@ -159,14 +159,34 @@ pub(crate) struct Draft {
     pub(crate) model: Option<ModelChoice>,
 }
 
+/// A coding agent agmend can launch here, as New Agent's Provider dropdown
+/// lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct LaunchProvider {
+    /// agmend's name for it: `claude` or `opencode`.
+    pub(crate) name: String,
+    pub(crate) title: String,
+    /// Its models by name; empty when it lists none.
+    #[serde(default)]
+    pub(crate) models: Vec<String>,
+}
+
 /// Something the person does that is not a chat message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Action {
     LaunchAgent {
         name: String,
-        model: String,
-        budget_cents: u32,
+        /// The coding agent's name as agmend lists it; `None` is Claude Code.
+        provider: Option<String>,
+        /// `None` runs the provider's own default model.
+        model: Option<String>,
+        /// `None` launches with no budget.
+        budget_cents: Option<u32>,
+        /// `None` is a general-purpose agent: no role.
+        role: Option<String>,
+        /// The palette slot to draw the agent in; `None` follows its role.
+        color: Option<u8>,
     },
     StopAgent(IdentityId),
     /// Brings an offline agent back on its previous sessions. `root` is
@@ -475,6 +495,9 @@ pub(crate) struct AgentRow {
     pub(crate) depth: u8,
     /// The item it works on or reads, as the hub's roster reports it.
     pub(crate) item: Option<String>,
+    /// The palette slot the person picked for it at launch, known only for
+    /// agents this machine runs.
+    pub(crate) color: Option<u8>,
 }
 
 /// One person and their agents.
@@ -587,6 +610,7 @@ pub(crate) struct AgentInfo {
     pub(crate) worktree_state: String,
     pub(crate) cleanup: String,
     pub(crate) spent_usd: f64,
+    /// Infinite for an agent launched with no budget.
     pub(crate) budget_usd: f64,
     pub(crate) since_launch_minutes: u32,
     pub(crate) working_minutes: u32,
@@ -697,6 +721,9 @@ pub(crate) struct Snapshot {
     /// The person's "until I change it" model, which the composer's chip
     /// opens on; `None` opens it on the listener's own model.
     pub(crate) standing_model: Option<ModelChoice>,
+    /// The coding agents agmend can launch; empty until it answers, or when
+    /// it is too old to say.
+    pub(crate) launch_providers: Vec<LaunchProvider>,
 }
 
 impl Snapshot {

@@ -15,6 +15,7 @@ use crate::ui::roles_panel::role_file_name;
 struct AgentName {
     handle: String,
     role: String,
+    color: Option<u8>,
 }
 
 /// What tabs and breadcrumbs name, from the snapshot.
@@ -44,6 +45,7 @@ impl PaneNames {
                     AgentName {
                         handle: agent.handle.clone(),
                         role: agent.role.clone(),
+                        color: agent.color,
                     },
                 )
             })
@@ -110,7 +112,7 @@ impl PaneNames {
             TabItem::Agent(id) => (
                 UiIcon::Sparkle,
                 self.agents.get(id).map_or(Color::Placeholder, |agent| {
-                    Color::Role(agent.role.clone().into())
+                    Color::agent(agent.color, &agent.role)
                 }),
             ),
             // The icon theme's file icon (`Pane::tab_file_icon`), or Lucide's
