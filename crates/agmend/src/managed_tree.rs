@@ -223,6 +223,8 @@ impl Managed {
         let launch = Self::validate_launch(json!({
             "project":parent.identity.project, "name":child.name, "role":child.role,
             "model":child.model, "budget_usd":child.budget_usd,
+            // A child runs on its parent's coding agent.
+            "provider":parent.provider,
         }))?;
         self.launch_at(launch, parent.worktree.clone(), Some(parent), child.brief)
             .await

@@ -27,8 +27,12 @@ const MAX_SWATCHES: u8 = 8;
 /// A coding agent the Provider dropdown lists.
 struct Provider {
     title: SharedString,
-    /// Whether agmend can launch it as a managed agent: only Claude Code today.
+    /// agmend's name for it; `None` for Claude Code, which a launch need not name.
+    name: Option<String>,
+    /// Whether agmend can launch it as a managed agent.
     launchable: bool,
+    /// Whether the first model is the provider's own default, sent as no model.
+    own_default: bool,
     models: Vec<SharedString>,
 }
 
@@ -71,7 +75,9 @@ fn claude(default_model: &str, listed: &[String]) -> Provider {
     }
     Provider {
         title: CLAUDE_CODE.into(),
+        name: None,
         launchable: true,
+        own_default: false,
         models,
     }
 }
@@ -110,21 +116,56 @@ impl NewAgentDialog {
                 .find(|group| group.agent == agent)
                 .map_or(&[][..], |group| group.models.as_slice())
         };
+        // What agmend says it can launch here. Before it answers, or when it
+        // is too old to say, Claude Code alone.
+        let mut providers = Vec::new();
+        if snapshot.launch_providers.is_empty() {
+            providers.push(claude(&self.default_model, listed("claude")));
+        }
+        for provider in &snapshot.launch_providers {
+            if provider.name == "claude" {
+                let models = if provider.models.is_empty() {
+                    listed("claude")
+                } else {
+                    &provider.models
+                };
+                providers.push(claude(&self.default_model, models));
+            } else {
+                providers.push(Provider {
+                    title: provider.title.clone().into(),
+                    name: Some(provider.name.clone()),
+                    launchable: true,
+                    own_default: true,
+                    models: std::iter::once("default".into())
+                        .chain(provider.models.iter().map(|model| model.clone().into()))
+                        .collect(),
+                });
+            }
+        }
+        // Other agents found on this machine are listed, and refused at launch.
         let others = snapshot
             .installed_agents
             .iter()
-            .filter(|agent| agent.is_installed() && agent.name != "claude")
+            .filter(|agent| {
+                agent.is_installed()
+                    && agent.name != "claude"
+                    && !snapshot
+                        .launch_providers
+                        .iter()
+                        .any(|provider| provider.name == agent.name)
+            })
             .map(|agent| Provider {
                 title: agent.title.clone().into(),
+                name: Some(agent.name.clone()),
                 launchable: false,
+                own_default: false,
                 models: match listed(&agent.name) {
                     [] => vec!["default".into()],
                     models => models.iter().map(|model| model.clone().into()).collect(),
                 },
             });
-        self.providers = std::iter::once(claude(&self.default_model, listed("claude")))
-            .chain(others)
-            .collect();
+        providers.extend(others);
+        self.providers = providers;
         self.model = self.default_model_index();
         for file in &snapshot.roles {
             let name = SharedString::from(file.name.clone());
@@ -141,12 +182,13 @@ impl NewAgentDialog {
         self
     }
 
-    /// Where the person's default model sits in Claude Code's list.
+    /// Where the person's default model sits in the chosen provider's list;
+    /// the first model when it is not there.
     fn default_model_index(&self) -> usize {
         self.providers
-            .first()
-            .and_then(|claude| {
-                claude
+            .get(self.provider)
+            .and_then(|provider| {
+                provider
                     .models
                     .iter()
                     .position(|model| model.as_ref() == self.default_model)
@@ -158,11 +200,7 @@ impl NewAgentDialog {
         match pick {
             Pick::Provider => {
                 self.provider = index;
-                self.model = if index == 0 {
-                    self.default_model_index()
-                } else {
-                    0
-                };
+                self.model = self.default_model_index();
                 self.error = None;
             }
             Pick::Model => self.model = index,
@@ -176,17 +214,23 @@ impl NewAgentDialog {
         };
         if !provider.launchable {
             self.error = Some(format!(
-                "agmen can launch only {CLAUDE_CODE} agents for now, not {}. Choose {CLAUDE_CODE} as the provider.",
+                "agmen cannot launch {} agents yet. Choose a provider it can launch, such as {CLAUDE_CODE}.",
                 provider.title
             ));
             cx.notify();
             return;
         }
         let name = self.name.read(cx).text().trim().to_owned();
-        let model = provider
-            .models
-            .get(self.model)
-            .map_or_else(|| self.default_model.clone(), ToString::to_string);
+        let model = if provider.own_default && self.model == 0 {
+            None
+        } else {
+            provider
+                .models
+                .get(self.model)
+                .map(ToString::to_string)
+                .or_else(|| provider.name.is_none().then(|| self.default_model.clone()))
+        };
+        let provider = provider.name.clone();
         let budget = self.budget.read(cx).text().trim();
         let budget_cents = if budget.is_empty() {
             None
@@ -214,6 +258,7 @@ impl NewAgentDialog {
                     .0
                     .act(Action::LaunchAgent {
                         name,
+                        provider,
                         model,
                         budget_cents,
                         role,
@@ -440,7 +485,8 @@ mod interaction_tests {
             *backend.acts.borrow(),
             vec![Action::LaunchAgent {
                 name: "worker".into(),
-                model: "opus".into(),
+                provider: None,
+                model: Some("opus".into()),
                 budget_cents: Some(1250),
                 role: None,
                 color: None,
@@ -492,7 +538,8 @@ mod interaction_tests {
             *backend.acts.borrow(),
             vec![Action::LaunchAgent {
                 name: "worker".into(),
-                model,
+                provider: None,
+                model: Some(model),
                 budget_cents: None,
                 role: Some(role),
                 color: Some(2),
@@ -517,7 +564,7 @@ mod interaction_tests {
         click(cx, "new-agent:launch");
         assert!(backend.acts.borrow().is_empty());
         let error = dialog.read_with(cx, |dialog, _| dialog.error.clone().unwrap());
-        assert!(error.contains("only Claude Code"), "{error}");
+        assert!(error.contains("cannot launch"), "{error}");
         assert!(error.contains(&other), "{error}");
         // Choosing Claude Code again clears the refusal and launches.
         click(cx, "new-agent:provider");
@@ -525,5 +572,63 @@ mod interaction_tests {
         assert!(dialog.read_with(cx, |dialog, _| dialog.error.is_none()));
         click(cx, "new-agent:launch");
         assert_eq!(backend.acts.borrow().len(), 1);
+    }
+
+    #[gpui::test]
+    fn opencode_launches_on_its_own_default_model_or_a_listed_one(cx: &mut TestAppContext) {
+        use crate::backend::LaunchProvider;
+        let (backend, _) = plan_globals(cx, Screen::Plan, None);
+        let mut snapshot = backend.snapshot();
+        snapshot.launch_providers = vec![
+            LaunchProvider {
+                name: "claude".into(),
+                title: CLAUDE_CODE.into(),
+                models: Vec::new(),
+            },
+            LaunchProvider {
+                name: "opencode".into(),
+                title: "OpenCode".into(),
+                models: vec!["anthropic/claude-haiku-5-5".into(), "ollama/qwen3".into()],
+            },
+        ];
+        let (dialog, cx) = cx.add_window_view(|_, cx| {
+            NewAgentDialog::new("sonnet".into(), None, cx).choices(&snapshot)
+        });
+        dialog.read_with(cx, |dialog, _| {
+            let opencode = &dialog.providers[1];
+            assert_eq!(opencode.title, "OpenCode");
+            assert!(opencode.launchable);
+            assert_eq!(
+                opencode.models,
+                ["default", "anthropic/claude-haiku-5-5", "ollama/qwen3"]
+            );
+            // agmend's list names OpenCode once; the fixture's installed copy is not repeated.
+            assert_eq!(
+                dialog
+                    .providers
+                    .iter()
+                    .filter(|provider| provider.title == "OpenCode")
+                    .count(),
+                1
+            );
+        });
+        click(cx, "new-agent:provider");
+        click(cx, "new-agent:provider:1");
+        click(cx, "new-agent:launch");
+        click(cx, "new-agent:model");
+        click(cx, "new-agent:model:1");
+        click(cx, "new-agent:launch");
+        let launch = |model: Option<&str>| Action::LaunchAgent {
+            name: String::new(),
+            provider: Some("opencode".into()),
+            model: model.map(Into::into),
+            budget_cents: None,
+            role: None,
+            color: None,
+        };
+        assert_eq!(
+            *backend.acts.borrow(),
+            vec![launch(None), launch(Some("anthropic/claude-haiku-5-5"))]
+        );
     }
 }

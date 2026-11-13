@@ -27,7 +27,7 @@ pub use compat::{BUILT_IN, RoleKind as Kind, Tier};
 pub use error::RoleError;
 pub use import::import_subagent;
 pub use layer::{Catalog, Layer, Layers, Resolved, read_personal_roles};
-pub use render::{claude_tools, render_prompt};
+pub use render::{claude_tools, opencode_actions, render_prompt};
 pub use schema::{
     EditScope, Prompt, Remove, Role, ToolClass, ToolSet, Worktree, WorktreeMode, parse,
 };

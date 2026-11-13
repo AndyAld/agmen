@@ -1136,3 +1136,103 @@ async fn child_launch_as_another_agent_needs_that_agents_token() {
     assert_eq!(error.code, ErrorCode::Unauthorized);
     assert_eq!(mints.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn an_opencode_agent_keeps_its_provider_and_its_children_run_on_it_too() {
+    let (fixture, _) = tree_fixture().await;
+    let root = fixture.dir.path().join("repo");
+    let refused = worker_call(
+        &fixture,
+        "agent_launch",
+        json!({"project":"project1","name":"bad","root":root,"provider":"cursor"}),
+    )
+    .await;
+    assert!(refused.is_err());
+    // A Claude Code model name would fail every OpenCode batch.
+    let refused = worker_call(
+        &fixture,
+        "agent_launch",
+        json!({"project":"project1","name":"bad","root":root,"provider":"opencode","model":"sonnet"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.message.contains("provider/model"),
+        "{}",
+        refused.message
+    );
+    worker_call(&fixture, "agent_launch", json!({"project":"project1","name":"worker","root":root,"role":"chain","provider":"opencode","model":"anthropic/claude-haiku-5-5"})).await.unwrap();
+    tier(&fixture, "agent001", Some(Tier::Owner)).await;
+    // OpenCode model names carry a provider, so a child gets no Claude default.
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"kid","role":"chain"}),
+    )
+    .await
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let list = managed.list(json!({})).await.unwrap();
+    let row = |id: &str| {
+        list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["identity"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row("agent001")["provider"], "opencode");
+    assert_eq!(row("agent001")["model"], "anthropic/claude-haiku-5-5");
+    assert_eq!(row("kid00001")["provider"], "opencode");
+    assert_eq!(row("kid00001")["model"], Value::Null);
+    assert!(fixture.posts.lock().unwrap().iter().any(|post| matches!(
+        &post.payload,
+        agmen_proto::Payload::Hello { agent: Some(agent), .. } if agent == "opencode"
+    )));
+    enqueue(&fixture, 1, "agent001").await;
+    managed.tick().await;
+    for _ in 0..200 {
+        if !fixture.runner.runs.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    {
+        let runs = fixture.runner.runs.lock().unwrap();
+        assert_eq!(runs[0].provider, crate::launch::Provider::OpenCode);
+        // The record keeps a plain session id; the launcher derives OpenCode's.
+        assert!(crate::transcripts::is_session_id(&runs[0].session_id));
+    }
+    let attach = worker_call(&fixture, "agent_attach", json!({"identity":"agent001"}))
+        .await
+        .unwrap_err();
+    assert!(
+        attach
+            .message
+            .contains("only Claude Code agents can be attached"),
+        "{}",
+        attach.message
+    );
+    managed.shutdown().await;
+    let restored = restarted(&fixture).await;
+    let list = restored.list(json!({})).await.unwrap();
+    assert!(
+        list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["provider"] == "opencode")
+    );
+}
+
+#[tokio::test]
+async fn a_launch_without_a_provider_is_claude_code_on_sonnet() {
+    let (fixture, _) = tree_fixture().await;
+    fixture.launch().await;
+    let list = fixture.daemon.core.managed.list(json!({})).await.unwrap();
+    assert_eq!(list["agents"][0]["provider"], "claude");
+    assert_eq!(list["agents"][0]["model"], "sonnet");
+    fixture.daemon.core.managed.shutdown().await;
+}

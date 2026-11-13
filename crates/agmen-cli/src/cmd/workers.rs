@@ -22,6 +22,9 @@ pub(crate) struct LaunchArgs {
     project: Option<ProjectId>,
     #[arg(long)]
     brief: Option<String>,
+    /// The coding agent to run it on: claude (the default) or opencode.
+    #[arg(long)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +112,12 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     if credential.is_some() && args.role.is_none() {
         return Err(Fail::usage("--role is required for an agent's launch").into());
     }
+    if credential.is_some() && args.provider.is_some() {
+        return Err(Fail::usage(
+            "--provider does not apply to an agent's launch: the child runs on its parent's coding agent",
+        )
+        .into());
+    }
     if credential.is_none() && args.brief.is_some() {
         return Err(Fail::usage(
             "--brief is for an agent's launch; message your agent after launching it",
@@ -135,6 +144,9 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     }
     if let Some(brief) = args.brief {
         params["brief"] = json!(brief);
+    }
+    if let Some(provider) = args.provider {
+        params["provider"] = json!(provider);
     }
     let answer = send_launch(&mut daemon, credential, params).await?;
     println!(
